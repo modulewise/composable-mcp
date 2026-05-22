@@ -165,6 +165,139 @@ function = " greet"
 description = "Custom description for the greet tool"
 ```
 
+### Channel-backed tools
+
+A tool can publish to a messaging channel instead of invoking a component
+directly. The request body is published as a Message, and whatever component
+consumes from the channel (via a `[subscription.*]`) handles the request and
+may publish a reply.
+
+```toml
+[server.mcp.tool.get-exchange-rate]
+channel = "exchange-rate-requests"
+description = "Get the current exchange rate between two currencies"
+input-schema = { type = "object", properties = { from = { type = "string" }, to = { type = "string" } }, required = ["from", "to"] }
+```
+
+Channel-backed tools require an explicit `input-schema` since no WIT signature
+is directly available at the tool boundary. An `output-schema` is optional.
+
+Component-backed tools may also supply an explicit `input-schema` or
+`output-schema`. When present, each must structurally align with the schema
+derived from WIT and the mapping blocks. The explicit schema can layer
+additional constraints or metadata on top of the derived shape.
+
+### Mapping pipeline
+
+A tool ultimately invokes a WIT function. Bridging between a Message
+(JSON body + headers) and WIT (typed args, typed result) involves a Message
+Mapper driven by four optional config blocks. Where they are defined depends on
+which type of tool target:
+
+- **Component-backed tool** (`component` + `function` on the tool definition):
+  the blocks are defined on the tool definition itself.
+- **Channel-backed tool** (`channel` on the tool definition): the blocks are
+  defined on the downstream `[subscription.*]` that registers a consumer on the
+  channel.
+
+**Inbound** (Message -> WIT call):
+
+1. `param-mapping`: per-arg templates that build WIT args by reading paths
+   into the inbound Message (`{body.<path>}`, `{headers.<path>}`). Without an
+   entry for a given WIT param, the param name is looked up as a top-level
+   field on the Message body, and that field's value becomes the arg.
+2. `param-encoding`: for any WIT arg typed as a byte array (`list<u8>`),
+   the associated value is encoded based on a content-type, either provided as
+   a literal value or via path-match against the body or headers.
+
+**Outbound** (WIT result -> reply Message):
+
+3. `result-decoding`: for any byte-array field on the WIT result, the value
+   is decoded based on a content-type, either provided as a literal value or
+   via path-match against the result. The decoded value replaces the bytes
+   before `result-mapping` runs.
+4. `result-mapping`: structural `body` / `headers` slots that shape the
+   reply Message: `body` becomes the tool reply's `structuredContent`, and
+   mapped headers are available for outbound `_meta` propagation (see
+   below).
+
+With no blocks declared, direct name-matching drives the inbound side and the
+WIT result becomes the reply body verbatim.
+
+The template path grammar (`body.foo`, `headers["x"]`, `body.items[3]`), the
+two content-type forms (literal or `{path}` resolution), and the supported
+content-types (`application/json`, `text/plain`) are identical across both
+component and channel targets as well as the HTTP server's mapping blocks. For
+a complete description, see the
+[composable HTTP server README](https://github.com/modulewise/composable-runtime/blob/main/crates/http-server/README.md).
+
+In the example below, `result-mapping.body` lifts the `forecast` field of the
+WIT result to become the tool reply body. The `headers` slot lifts
+`quota.remaining` to a Message header named `x-ratelimit-remaining`. Headers on
+the reply Message are the bridge to outbound `_meta` propagation. The next
+section shows how `propagate-result-meta` emits a selected header as an MCP
+`_meta` entry on the `CallToolResult`.
+
+```toml
+[server.mcp.tool.weather]
+component = "weather-client"
+function = "get-forecast"
+
+[server.mcp.tool.weather.param-mapping]
+url = "https://api.example.com/forecast?city={body.city}"
+
+[server.mcp.tool.weather.result-mapping]
+body = "{forecast}"
+headers = { x-ratelimit-remaining = "{quota.remaining}" }
+```
+
+The same config can be applied on a subscription:
+
+```toml
+[subscription.forecast]
+channel = "forecast-requests"
+component = "weather-client"
+function = "get-forecast"
+
+[subscription.forecast.param-mapping]
+url = "https://api.example.com/forecast?city={body.city}"
+
+[subscription.forecast.result-mapping]
+body = "{forecast}"
+headers = { x-ratelimit-remaining = "{quota.remaining}" }
+```
+
+### Propagate MCP `_meta`
+
+Tool definitions can lift MCP `_meta` entries from the request into inbound
+Message headers, and emit Message headers as `_meta` entries on the tool result:
+
+```toml
+[server.mcp.tool.tagger]
+component = "service"
+function = "process"
+propagate-request-meta = [
+    "com.example.tools/tag",
+    "com.example.tools/correlation-id as correlation-id",
+]
+propagate-result-meta = [
+    "x-ratelimit-remaining as com.example.tools/ratelimit-remaining",
+]
+```
+
+Each entry has either the `_meta` key itself or can be renamed using the
+`"source as target"` option. For `propagate-request-meta`, the source side is
+the MCP `_meta` key and the target is a Message header name. For
+`propagate-result-meta`, the source is a Message header name and the target is
+the MCP `_meta` key.
+
+Validation rejects entries whose MCP-side key does not conform to the MCP
+`_meta` format (prefix labels + name), per the
+[MCP spec](https://modelcontextprotocol.io/specification/2025-11-25/basic#_meta).
+
+A `propagate-result-meta` target that collides with a `result-mapping.headers`
+target from a different source is rejected at startup.
+
 ### Origin validation
 
 Toolbelt validates the `Origin` header if present on requests per the MCP spec.

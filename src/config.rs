@@ -1,10 +1,37 @@
+//! Parses `[server.*]` definitions where `type = "mcp"` and the
+//! `[server.mcp.tool.*]` entries nested within.
+//!
+//! A tool target is either:
+//!
+//! - `Component`: invokes a WIT function directly. The tool definition
+//!   may carry the four WIT-bridging mapping blocks (`param-mapping`,
+//!   `param-encoding`, `result-decoding`, `result-mapping`) and an
+//!   optional `input-schema` / `output-schema`. Both schemas are derived
+//!   from the WIT signature (with the mapping blocks applied). If an
+//!   explicit schema is also provided, it must structurally align with
+//!   the derived shape and may layer additional constraints or metadata
+//!   on top.
+//! - `Channel`: publishes the request as a Message to a channel. The
+//!   mapping blocks are NOT carried here since whatever subscription
+//!   consumes from the channel owns them. Requires an explicit `input-schema`.
+//!
+//! Tools also accept `propagate-request-meta` and `propagate-result-meta`,
+//! each a list of `"source"` or `"source as target"` entries. The
+//! MCP-side name of each entry is validated against the `_meta` key
+//! format from the MCP spec (2025-11-25).
+//!
+//! A `propagate-result-meta` target that collides with a
+//! `result-mapping.headers` target from a different source is rejected
+//! at config-time.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
 use composable_runtime::{
-    CategoryClaim, Condition, ConfigHandler, Operator, PropertyMap, Selector,
+    CategoryClaim, Condition, ConfigHandler, MappingConfig, Operator, ParamEncoding, ParamMapping,
+    PropagatedHeader, PropertyMap, ResultDecoding, Selector,
 };
 
 // Default component selector for auto-discovery: top-level components only.
@@ -16,6 +43,20 @@ pub enum ToolTarget {
     Component {
         component: String,
         function: String,
+        /// The four mapping blocks (param-mapping, param-encoding,
+        /// result-decoding, result-mapping) bundled in pipeline order.
+        mapping: MappingConfig,
+        /// Optional explicit input-schema. When provided, it must
+        /// structurally align with the schema derived from the WIT
+        /// signature (with `param-mapping` / `param-encoding` applied).
+        /// Used to layer additional constraints or metadata on top of
+        /// the derived shape.
+        input_schema: Option<serde_json::Value>,
+        /// Optional explicit output-schema. When absent, the schema is
+        /// derived (from the WIT result, the result-mapping, or both with
+        /// any result-decoding swap applied). When provided, it must
+        /// structurally align with the derived schema.
+        output_schema: Option<serde_json::Value>,
     },
     Channel {
         channel: String,
@@ -30,6 +71,15 @@ pub struct ToolConfig {
     pub name: String,
     pub target: ToolTarget,
     pub description: Option<String>,
+    /// MCP `_meta` keys to lift into inbound Message headers when a
+    /// tools/call request arrives. Each entry's source is a `_meta` key
+    /// (e.g. `com.example.tools/tag`); target is the Message header name
+    /// to write under (defaults to the source).
+    pub propagate_request_meta: Vec<PropagatedHeader>,
+    /// Reply Message headers to emit as MCP `_meta` entries on the
+    /// `CallToolResult`. Each entry's source is a Message header name;
+    /// target is the `_meta` key to write under (defaults to the source).
+    pub propagate_result_meta: Vec<PropagatedHeader>,
 }
 
 /// Parsed MCP server definition.
@@ -294,26 +344,78 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
         let input_schema = tool_props.remove("input-schema");
         let output_schema = tool_props.remove("output-schema");
 
-        let target = match (component, function, channel) {
-            (Some(component), Some(function), None) => {
-                if input_schema.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "Server '{server_name}': tool '{tool_name}' has 'input-schema' \
-                         but component-backed tools derive their schema directly from WIT"
-                    ));
-                }
-                if output_schema.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "Server '{server_name}': tool '{tool_name}' has 'output-schema' \
-                         but component-backed tools derive their schema directly from WIT"
-                    ));
-                }
-                ToolTarget::Component {
-                    component,
-                    function,
-                }
+        let param_mapping = match tool_props.remove("param-mapping") {
+            Some(serde_json::Value::Object(map)) => Some(map.into_iter().collect::<ParamMapping>()),
+            Some(got) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' 'param-mapping' must be an object, got {got}"
+                ));
             }
+            None => None,
+        };
+
+        let param_encoding = match tool_props.remove("param-encoding") {
+            Some(serde_json::Value::Object(map)) => {
+                Some(ParamEncoding::parse(&map).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' 'param-encoding': {e}"
+                    )
+                })?)
+            }
+            Some(got) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' 'param-encoding' must be an object, got {got}"
+                ));
+            }
+            None => None,
+        };
+
+        let result_decoding = match tool_props.remove("result-decoding") {
+            Some(serde_json::Value::Object(map)) => {
+                Some(ResultDecoding::parse(&map).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' 'result-decoding': {e}"
+                    )
+                })?)
+            }
+            Some(got) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' 'result-decoding' must be an object, got {got}"
+                ));
+            }
+            None => None,
+        };
+
+        // The `result-mapping` is flexible JSON (object/array/string/literal).
+        // The runtime `map_result` validates substitution at runtime.
+        let result_mapping = tool_props.remove("result-mapping");
+
+        let target = match (component, function, channel) {
+            (Some(component), Some(function), None) => ToolTarget::Component {
+                component,
+                function,
+                mapping: MappingConfig {
+                    param_mapping,
+                    param_encoding,
+                    result_decoding,
+                    result_mapping,
+                },
+                input_schema,
+                output_schema,
+            },
             (None, None, Some(channel)) => {
+                if param_mapping.is_some()
+                    || param_encoding.is_some()
+                    || result_decoding.is_some()
+                    || result_mapping.is_some()
+                {
+                    return Err(anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' has 'param-mapping', \
+                         'param-encoding', 'result-decoding', or 'result-mapping' but those \
+                         apply to component-backed tools only; for channel-backed tools, \
+                         subscriptions own any mappings"
+                    ));
+                }
                 let input_schema = input_schema.ok_or_else(|| {
                     anyhow::anyhow!(
                         "Server '{server_name}': channel-backed tool '{tool_name}' requires 'input-schema'"
@@ -359,6 +461,50 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
             None => None,
         };
 
+        let propagate_request_meta = parse_propagated_meta_list(
+            &mut tool_props,
+            "propagate-request-meta",
+            PropagationDirection::Inbound,
+            server_name,
+            &tool_name,
+        )?;
+        let propagate_result_meta = parse_propagated_meta_list(
+            &mut tool_props,
+            "propagate-result-meta",
+            PropagationDirection::Outbound,
+            server_name,
+            &tool_name,
+        )?;
+
+        // Cross-config check: a `result-mapping.headers` target would be
+        // silently overridden if any `propagate-result-meta` entry has that
+        // target name with a different source.
+        if let ToolTarget::Component {
+            mapping:
+                MappingConfig {
+                    result_mapping: Some(rm),
+                    ..
+                },
+            ..
+        } = &target
+            && let Some(serde_json::Value::Object(headers)) = rm.get("headers")
+        {
+            let mapped_targets: std::collections::HashSet<&str> =
+                headers.keys().map(|s| s.as_str()).collect();
+            for entry in &propagate_result_meta {
+                if mapped_targets.contains(entry.target()) && entry.source() != entry.target() {
+                    return Err(anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}': '{}' is written by \
+                         'result-mapping.headers' but overridden by 'propagate-result-meta' \
+                         entry '{} as {}'",
+                        entry.target(),
+                        entry.source(),
+                        entry.target(),
+                    ));
+                }
+            }
+        }
+
         if !tool_props.is_empty() {
             let unknown: Vec<_> = tool_props.keys().collect();
             return Err(anyhow::anyhow!(
@@ -370,10 +516,154 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
             name: tool_name,
             target,
             description,
+            propagate_request_meta,
+            propagate_result_meta,
         });
     }
 
     Ok(tools)
+}
+
+// The direction of propagation. Determines which side of each entry
+// (source / target) must conform to MCP `_meta` key syntax (the other side
+// is a Message header name and has looser rules).
+#[derive(Debug, Clone, Copy)]
+enum PropagationDirection {
+    // Inbound: source is the MCP `_meta` key on the request; target is the
+    // Message header name written on the inbound Message.
+    Inbound,
+    // Outbound: source is the Message header name on the reply Message;
+    // target is the MCP `_meta` key written on the result.
+    Outbound,
+}
+
+// Parse a `propagate-{request,result}-meta` array into Vec<PropagatedHeader>.
+// Each entry is a string in the `"source"` or `"source as target"` form.
+// The direction determines which side must conform to MCP `_meta` key syntax.
+fn parse_propagated_meta_list(
+    tool_props: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    direction: PropagationDirection,
+    server_name: &str,
+    tool_name: &str,
+) -> Result<Vec<PropagatedHeader>> {
+    let raw = match tool_props.remove(key) {
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => Ok(s),
+                other => Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' '{key}' entries must be strings, got {other}"
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(got) => {
+            return Err(anyhow::anyhow!(
+                "Server '{server_name}': tool '{tool_name}' '{key}' must be an array of strings, got {got}"
+            ));
+        }
+        None => Vec::new(),
+    };
+    raw.into_iter()
+        .map(|s| {
+            let entry = PropagatedHeader::parse(&s).map_err(|e| {
+                anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' '{key}' entry '{s}': {e}"
+                )
+            })?;
+            let meta_side = match direction {
+                PropagationDirection::Inbound => entry.source(),
+                PropagationDirection::Outbound => entry.target(),
+            };
+            validate_mcp_meta_key(meta_side).map_err(|e| {
+                anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' '{key}' entry '{s}': '{meta_side}' is not a valid MCP _meta key: {e}"
+                )
+            })?;
+            Ok(entry)
+        })
+        .collect()
+}
+
+// Validate an MCP `_meta` key per the spec (2025-11-25).
+fn validate_mcp_meta_key(key: &str) -> std::result::Result<(), String> {
+    if key.is_empty() {
+        return Err("empty key".to_string());
+    }
+    let (prefix, name) = match key.rsplit_once('/') {
+        Some((p, n)) => (Some(p), n),
+        None => (None, key),
+    };
+    if let Some(prefix) = prefix {
+        validate_meta_prefix(prefix)?;
+    }
+    validate_meta_name(name)?;
+    Ok(())
+}
+
+fn validate_meta_prefix(prefix: &str) -> std::result::Result<(), String> {
+    if prefix.is_empty() {
+        return Err("prefix before '/' is empty".to_string());
+    }
+    for label in prefix.split('.') {
+        validate_meta_label(label)?;
+    }
+    Ok(())
+}
+
+fn validate_meta_label(label: &str) -> std::result::Result<(), String> {
+    let bytes = label.as_bytes();
+    if bytes.is_empty() {
+        return Err("empty prefix label".to_string());
+    }
+    if !bytes[0].is_ascii_alphabetic() {
+        return Err(format!("prefix label '{label}' must start with a letter"));
+    }
+    if bytes.len() == 1 {
+        return Ok(());
+    }
+    let last = *bytes.last().unwrap();
+    if !last.is_ascii_alphanumeric() {
+        return Err(format!(
+            "prefix label '{label}' must end with a letter or digit"
+        ));
+    }
+    for b in &bytes[1..bytes.len() - 1] {
+        if !(b.is_ascii_alphanumeric() || *b == b'-') {
+            return Err(format!(
+                "prefix label '{label}' has invalid interior character"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_meta_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty() {
+        // Empty name is permitted.
+        return Ok(());
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return Err(format!(
+            "name '{name}' must begin with an alphanumeric character"
+        ));
+    }
+    if bytes.len() == 1 {
+        return Ok(());
+    }
+    let last = *bytes.last().unwrap();
+    if !last.is_ascii_alphanumeric() {
+        return Err(format!(
+            "name '{name}' must end with an alphanumeric character"
+        ));
+    }
+    for b in &bytes[1..bytes.len() - 1] {
+        if !(b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b'.')) {
+            return Err(format!("name '{name}' has invalid interior character"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -420,7 +710,7 @@ mod tests {
         assert_eq!(servers[0].tools.len(), 1);
         assert_eq!(servers[0].tools[0].name, "add-two");
         assert!(
-            matches!(&servers[0].tools[0].target, ToolTarget::Component { component, function }
+            matches!(&servers[0].tools[0].target, ToolTarget::Component { component, function, .. }
                 if component == "math" && function == "add-two")
         );
         assert!(servers[0].tools[0].description.is_none());
@@ -575,6 +865,371 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cannot have both"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn component_tool_with_param_and_result_mapping() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "shaped": {
+                        "component": "service",
+                        "function": "fetch",
+                        "param-mapping": { "url": "https://example.com/{id}" },
+                        "result-mapping": { "data": "{body}" }
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        match &servers[0].tools[0].target {
+            ToolTarget::Component {
+                mapping,
+                output_schema,
+                ..
+            } => {
+                assert!(mapping.param_mapping.is_some());
+                assert!(mapping.result_mapping.is_some());
+                assert!(output_schema.is_none());
+            }
+            other => panic!("expected Component target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn component_tool_with_explicit_output_schema_allowed() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "describe-add": {
+                        "component": "math",
+                        "function": "add-two",
+                        "output-schema": { "type": "object", "properties": {} }
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        assert!(matches!(
+            &servers[0].tools[0].target,
+            ToolTarget::Component {
+                output_schema: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn component_tool_with_explicit_input_schema_allowed() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "add2": {
+                        "component": "math",
+                        "function": "add-two",
+                        "input-schema": { "type": "object", "properties": {} }
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        assert!(matches!(
+            &servers[0].tools[0].target,
+            ToolTarget::Component {
+                input_schema: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn channel_tool_with_mapping_is_error() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "channel": "events",
+                        "input-schema": { "type": "object" },
+                        "param-mapping": { "x": "{body}" }
+                    }
+                }),
+            ),
+        ]);
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("apply to component-backed tools only"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tool_with_propagate_request_meta() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "propagator": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-request-meta": [
+                            "com.example.x/foo",
+                            "com.example.y/bar as tracked-bar"
+                        ]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        let entries = &servers[0].tools[0].propagate_request_meta;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].source(), "com.example.x/foo");
+        assert_eq!(entries[0].target(), "com.example.x/foo");
+        assert_eq!(entries[1].source(), "com.example.y/bar");
+        assert_eq!(entries[1].target(), "tracked-bar");
+    }
+
+    #[test]
+    fn tool_with_propagate_result_meta() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "emitter": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-result-meta": [
+                            "x-ratelimit-remaining as com.example.tools/ratelimit-remaining"
+                        ]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        let entries = &servers[0].tools[0].propagate_result_meta;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source(), "x-ratelimit-remaining");
+        assert_eq!(entries[0].target(), "com.example.tools/ratelimit-remaining");
+    }
+
+    #[test]
+    fn propagate_request_meta_non_string_entry_is_error() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-request-meta": ["num", 42]
+                    }
+                }),
+            ),
+        ]);
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("'propagate-request-meta' entries must be strings"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn propagate_request_meta_invalid_meta_key_source_is_error() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-request-meta": ["-bad-prefix/x"]
+                    }
+                }),
+            ),
+        ]);
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a valid MCP _meta key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn propagate_result_meta_invalid_meta_key_target_is_error() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-result-meta": ["x-source as bad-name-"]
+                    }
+                }),
+            ),
+        ]);
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a valid MCP _meta key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn propagate_meta_accepts_reverse_dns_keys() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "ok": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-request-meta": ["com.example.tools/tag"],
+                        "propagate-result-meta": ["x-ratelimit-remaining as com.example.tools/ratelimit-remaining"]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+    }
+
+    #[test]
+    fn propagate_meta_accepts_reserved_mcp_prefix() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "ok": {
+                        "component": "c",
+                        "function": "f",
+                        "propagate-request-meta": ["io.modelcontextprotocol/related-task"]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+    }
+
+    #[test]
+    fn result_mapping_header_overridden_by_propagate_result_meta_is_error() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "component": "c",
+                        "function": "f",
+                        "result-mapping": {
+                            "headers": { "x-tag": "{label}" }
+                        },
+                        "propagate-result-meta": ["other-source as x-tag"]
+                    }
+                }),
+            ),
+        ]);
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("written by 'result-mapping.headers'") && err.contains("overridden"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn result_mapping_header_with_matching_propagate_result_meta_identity_is_ok() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "ok": {
+                        "component": "c",
+                        "function": "f",
+                        "result-mapping": {
+                            "headers": { "x-tag": "{label}" }
+                        },
+                        "propagate-result-meta": ["x-tag"]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
     }
 
     #[test]
