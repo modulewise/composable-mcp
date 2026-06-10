@@ -187,7 +187,7 @@ Component-backed tools may also supply an explicit `input-schema` or
 derived from WIT and the mapping blocks. The explicit schema can layer
 additional constraints or metadata on top of the derived shape.
 
-### Mapping pipeline
+### Mapping Messages to and from WIT
 
 A tool ultimately invokes a WIT function. Bridging between a Message
 (JSON body + headers) and WIT (typed args, typed result) involves a Message
