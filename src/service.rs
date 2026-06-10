@@ -41,7 +41,7 @@ impl Default for McpService {
     }
 }
 
-/// Resolved runtime representation of a tool's backend.
+/// Resolved runtime representation of a tool's target.
 #[derive(Clone)]
 pub enum ResolvedToolTarget {
     Component {
@@ -53,13 +53,13 @@ pub enum ResolvedToolTarget {
     },
 }
 
-/// A fully resolved tool: MCP schema + validators + backend.
+/// A fully resolved tool: MCP schema + target + validators + propagators.
 #[derive(Clone)]
 pub struct ResolvedTool {
     pub tool: Tool,
+    pub target: ResolvedToolTarget,
     pub input_validator: jsonschema::Validator,
     pub output_validator: Option<jsonschema::Validator>,
-    pub target: ResolvedToolTarget,
     /// Inbound `_meta` lifts: each entry reads an MCP `_meta` key and writes
     /// the value under the target name on the inbound Message headers.
     pub propagate_request_meta: Vec<composable_runtime::PropagatedHeader>,

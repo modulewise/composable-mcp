@@ -234,7 +234,7 @@ a complete description, see the
 In the example below, `result-mapping.body` lifts the `forecast` field of the
 WIT result to become the tool reply body. The `headers` slot lifts
 `quota.remaining` to a Message header named `x-ratelimit-remaining`. Headers on
-the reply Message are the bridge to outbound `_meta` propagation. The next
+the reply Message are available for outbound `_meta` propagation. The next
 section shows how `propagate-result-meta` emits a selected header as an MCP
 `_meta` entry on the `CallToolResult`.
 
@@ -274,8 +274,8 @@ Message headers, and emit Message headers as `_meta` entries on the tool result:
 
 ```toml
 [server.mcp.tool.tagger]
-component = "service"
-function = "process"
+component = "tagger"
+function = "tag"
 propagate-request-meta = [
     "com.example.tools/tag",
     "com.example.tools/correlation-id as correlation-id",
@@ -286,7 +286,7 @@ propagate-result-meta = [
 ```
 
 Each entry has either the `_meta` key itself or can be renamed using the
-`"source as target"` option. For `propagate-request-meta`, the source side is
+"[source] as [target]" option. For `propagate-request-meta`, the source side is
 the MCP `_meta` key and the target is a Message header name. For
 `propagate-result-meta`, the source is a Message header name and the target is
 the MCP `_meta` key.

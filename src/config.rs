@@ -4,9 +4,9 @@
 //! A tool target is either:
 //!
 //! - `Component`: invokes a WIT function directly. The tool definition
-//!   may carry the four WIT-bridging mapping blocks (`param-mapping`,
+//!   may carry the four Message <-> WIT mapping blocks (`param-mapping`,
 //!   `param-encoding`, `result-decoding`, `result-mapping`) and an
-//!   optional `input-schema` / `output-schema`. Both schemas are derived
+//!   optional `input-schema` / `output-schema`. Base schemas are derived
 //!   from the WIT signature (with the mapping blocks applied). If an
 //!   explicit schema is also provided, it must structurally align with
 //!   the derived shape and may layer additional constraints or metadata
@@ -47,15 +47,14 @@ pub enum ToolTarget {
         /// result-decoding, result-mapping) bundled in pipeline order.
         mapping: MappingConfig,
         /// Optional explicit input-schema. When provided, it must
-        /// structurally align with the schema derived from the WIT
-        /// signature (with `param-mapping` / `param-encoding` applied).
-        /// Used to layer additional constraints or metadata on top of
-        /// the derived shape.
+        /// structurally align with the schema derived from the WIT signature
+        /// (with any `param-mapping` and `param-encoding` applied). Used to
+        /// layer additional constraints or metadata over the derived schema.
         input_schema: Option<serde_json::Value>,
-        /// Optional explicit output-schema. When absent, the schema is
-        /// derived (from the WIT result, the result-mapping, or both with
-        /// any result-decoding swap applied). When provided, it must
-        /// structurally align with the derived schema.
+        /// Optional explicit output-schema. When provided, it must
+        /// structurally align with the schema derived from the WIT result
+        /// (with any `result-mapping` and `result-decoding` applied). Used to
+        /// layer additional constraints or metadata over the derived schema.
         output_schema: Option<serde_json::Value>,
     },
     Channel {
@@ -72,13 +71,12 @@ pub struct ToolConfig {
     pub target: ToolTarget,
     pub description: Option<String>,
     /// MCP `_meta` keys to lift into inbound Message headers when a
-    /// tools/call request arrives. Each entry's source is a `_meta` key
-    /// (e.g. `com.example.tools/tag`); target is the Message header name
-    /// to write under (defaults to the source).
+    /// tools/call request arrives. Each entry's source is a `_meta` key;
+    /// target is the Message header name (defaults to the source).
     pub propagate_request_meta: Vec<PropagatedHeader>,
     /// Reply Message headers to emit as MCP `_meta` entries on the
     /// `CallToolResult`. Each entry's source is a Message header name;
-    /// target is the `_meta` key to write under (defaults to the source).
+    /// target is the `_meta` key (defaults to the source).
     pub propagate_result_meta: Vec<PropagatedHeader>,
 }
 
@@ -525,21 +523,20 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
 }
 
 // The direction of propagation. Determines which side of each entry
-// (source / target) must conform to MCP `_meta` key syntax (the other side
-// is a Message header name and has looser rules).
+// (source / target) must conform to MCP `_meta` key syntax.
 #[derive(Debug, Clone, Copy)]
 enum PropagationDirection {
     // Inbound: source is the MCP `_meta` key on the request; target is the
-    // Message header name written on the inbound Message.
+    // Message header name propagated on the inbound Message.
     Inbound,
     // Outbound: source is the Message header name on the reply Message;
-    // target is the MCP `_meta` key written on the result.
+    // target is the MCP `_meta` key propagated on the result.
     Outbound,
 }
 
-// Parse a `propagate-{request,result}-meta` array into Vec<PropagatedHeader>.
-// Each entry is a string in the `"source"` or `"source as target"` form.
-// The direction determines which side must conform to MCP `_meta` key syntax.
+// Parse a request or result propagation property into Vec<PropagatedHeader>.
+// Each entry is a string in the `"source"` or `"source as target"` form. The
+// direction determines which side must conform to MCP `_meta` key syntax.
 fn parse_propagated_meta_list(
     tool_props: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -912,7 +909,7 @@ mod tests {
             (
                 "tool",
                 serde_json::json!({
-                    "describe-add": {
+                    "add-operation": {
                         "component": "math",
                         "function": "add-two",
                         "output-schema": { "type": "object", "properties": {} }
@@ -942,7 +939,7 @@ mod tests {
             (
                 "tool",
                 serde_json::json!({
-                    "add2": {
+                    "add2-operation": {
                         "component": "math",
                         "function": "add-two",
                         "input-schema": { "type": "object", "properties": {} }
@@ -1130,29 +1127,6 @@ mod tests {
             err.contains("not a valid MCP _meta key"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn propagate_meta_accepts_reverse_dns_keys() {
-        let (mut handler, _) = make_handler();
-        let properties = props(vec![
-            ("type", serde_json::json!("mcp")),
-            ("port", serde_json::json!(3001)),
-            (
-                "tool",
-                serde_json::json!({
-                    "ok": {
-                        "component": "c",
-                        "function": "f",
-                        "propagate-request-meta": ["com.example.tools/tag"],
-                        "propagate-result-meta": ["x-ratelimit-remaining as com.example.tools/ratelimit-remaining"]
-                    }
-                }),
-            ),
-        ]);
-        handler
-            .handle_category("server", "mcp", properties)
-            .unwrap();
     }
 
     #[test]

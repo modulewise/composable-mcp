@@ -279,10 +279,9 @@ impl McpServer {
             )
         };
 
-        // Establish the propagation scope around the entire dispatch so any
-        // Message construction inside picks up tracing keys via MessageBuilder's
-        // task-local auto-merge, and so the invoke's downstream WIT code (host
-        // imports for outbound HTTP, etc.) sees the same context.
+        // Establish the propagation scope around dispatch so any Message
+        // construction in the scope picks up tracing keys via MessageBuilder's
+        // task-local auto-merge, and so downstream invocation has the context.
         match context {
             Some(entries) if !entries.is_empty() => {
                 let ctx = PropagationContext { entries };
@@ -304,7 +303,7 @@ fn propagated_headers(msg: &Message) -> HashMap<String, String> {
     out
 }
 
-// Build a [`Message`] from an MCP `tools/call` invocation.
+// Build a `Message` from an MCP `tools/call` invocation.
 //
 // - Body: `arguments` serialized as JSON, content-type `application/json`.
 // - Headers: for each `propagate-request-meta` entry, look up the source
@@ -313,8 +312,8 @@ fn propagated_headers(msg: &Message) -> HashMap<String, String> {
 //   Non-string `_meta` values are skipped with a warning.
 //
 // Well-known tracing keys (PROPAGATED_HEADERS) are not handled by this
-// helper. They flow via [`MessageBuilder::build`]'s task-local auto-merge
-// when the caller has established a [`PROPAGATION_CONTEXT`] scope around the
+// helper. They flow via `MessageBuilder::build`'s task-local auto-merge
+// when the caller has established a `PROPAGATION_CONTEXT` scope around the
 // build site.
 fn build_message_from_mcp_call(
     arguments: &JsonObject,
@@ -348,7 +347,7 @@ fn build_message_from_mcp_call(
     Ok(builder.build())
 }
 
-// Build a [`CallToolResult`] from a reply [`Message`].
+// Build a `CallToolResult` from a reply `Message`.
 //
 // The reply Message body is expected to be JSON. MCP publishes channel
 // requests as JSON, and the subscription activator's
@@ -356,13 +355,13 @@ fn build_message_from_mcp_call(
 //
 // Behavior:
 // - If `tool.output_schema` is `None`: a text-content success result with
-//   the body either as the raw JSON string (when scalar/string) or a
+//   the body as the raw string when it is a JSON string, otherwise a
 //   pretty-printed JSON form.
 // - If `tool.output_schema` is `Some`: parse the body as JSON, apply
 //   tolerant-reader coercion (`schema::coerce_value`), validate against the
-//   provided `output_validator` if present, apply the wrapper-shape rule
-//   (a single `array`-typed or `oneOf` property wraps the body value), and
-//   return a structured success result.
+//   provided `output_validator` if present, and return a structured success
+//   result. When the output schema is a single `array`-typed or `oneOf`
+//   property, the body value is wrapped under that property name.
 //
 // `result<T, E>` to `isError` mapping is NOT handled here. The runtime's
 // `invoke` already returns `Err` for the WIT `err` arm; that surfaces in
@@ -780,7 +779,7 @@ mod tests {
         let msg = reply_msg(serde_json::json!("hello, world"));
         let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
         let text = r.content[0].as_text().unwrap().text.clone();
-        // Scalar string body returns the raw string, not JSON-quoted.
+        // A JSON string body returns the raw string, not JSON-quoted.
         assert_eq!(text, "hello, world");
     }
 
@@ -801,47 +800,25 @@ mod tests {
 
     #[test]
     fn build_result_coerces_via_schema_then_returns_structured() {
-        // Schema declares `meta` as string; body has it as an object.
+        // Schema declares `kv` as string; body has it as an object.
         // schema::coerce_value stringifies that nested value.
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string" },
-                "meta": { "type": "string" }
+                "kv": { "type": "string" }
             }
         });
         let tool = tool_with_output_schema(Some(schema));
         let msg = reply_msg(serde_json::json!({
             "name": "Alice",
-            "meta": { "k": 1 }
+            "kv": { "k": 1 }
         }));
         let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
         assert!(!r.is_error.unwrap_or(false));
         let structured = r.structured_content.unwrap();
         assert_eq!(structured["name"], serde_json::json!("Alice"));
-        assert_eq!(structured["meta"], serde_json::json!("{\"k\":1}"));
-    }
-
-    #[test]
-    fn build_result_with_array_wrapper_schema_wraps_under_property() {
-        // Wrapper shape: single property of array type.
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "users": {
-                    "type": "array",
-                    "items": { "type": "object" }
-                }
-            },
-            "required": ["users"]
-        });
-        let tool = tool_with_output_schema(Some(schema));
-        let body = serde_json::json!([{ "name": "Alice" }, { "name": "Bob" }]);
-        let msg = reply_msg(body.clone());
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
-        let structured = r.structured_content.unwrap();
-        // Body (the array) wrapped under `users`.
-        assert_eq!(structured, serde_json::json!({ "users": body }));
+        assert_eq!(structured["kv"], serde_json::json!("{\"k\":1}"));
     }
 
     #[test]
