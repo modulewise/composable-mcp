@@ -4,10 +4,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use composable_runtime::{ComponentInvoker, ConfigHandler, Function, MessagePublisher, Service};
+use composable_runtime::{
+    ComponentInvoker, ConfigHandler, MessageMapper, MessagePublisher, Service,
+};
 use rmcp::model::Tool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use composable_runtime::schema;
 
 use crate::config::{self, McpServerConfig, McpServerConfigHandler, SharedConfig, ToolTarget};
 use crate::mapper::McpMapper;
@@ -37,25 +41,31 @@ impl Default for McpService {
     }
 }
 
-/// Resolved runtime representation of a tool's backend.
+/// Resolved runtime representation of a tool's target.
 #[derive(Clone)]
 pub enum ResolvedToolTarget {
     Component {
-        function: Box<Function>,
         component_name: String,
+        mapper: Arc<MessageMapper>,
     },
     Channel {
         channel: String,
     },
 }
 
-/// A fully resolved tool: MCP schema + validators + backend.
+/// A fully resolved tool: MCP schema + target + validators + propagators.
 #[derive(Clone)]
 pub struct ResolvedTool {
     pub tool: Tool,
+    pub target: ResolvedToolTarget,
     pub input_validator: jsonschema::Validator,
     pub output_validator: Option<jsonschema::Validator>,
-    pub target: ResolvedToolTarget,
+    /// Inbound `_meta` lifts: each entry reads an MCP `_meta` key and writes
+    /// the value under the target name on the inbound Message headers.
+    pub propagate_request_meta: Vec<composable_runtime::PropagatedHeader>,
+    /// Outbound `_meta` emits: each entry reads a reply Message header and
+    /// writes the value under the target name on the `CallToolResult._meta`.
+    pub propagate_result_meta: Vec<composable_runtime::PropagatedHeader>,
 }
 
 // Resolve all tools for a server from both explicit tool configs and component-selector.
@@ -79,9 +89,17 @@ fn resolve_tools(
                     "input-schema",
                     &input_schema,
                 )?;
+                let mapper = MessageMapper::from_component(
+                    component,
+                    Some(function.key()),
+                    composable_runtime::MappingConfig::default(),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Server '{}': tool '{}': {e}", server_config.name, tool_name)
+                })?;
                 let target = ResolvedToolTarget::Component {
-                    function: Box::new(function.clone()),
                     component_name: component.metadata.name.clone(),
+                    mapper: Arc::new(mapper),
                 };
                 tools.insert(
                     tool_name,
@@ -92,6 +110,8 @@ fn resolve_tools(
                         // when config allows optional explicit output-schema.
                         output_validator: None,
                         target,
+                        propagate_request_meta: Vec::new(),
+                        propagate_result_meta: Vec::new(),
                     },
                 );
             }
@@ -104,6 +124,9 @@ fn resolve_tools(
             ToolTarget::Component {
                 component,
                 function,
+                mapping,
+                input_schema,
+                output_schema,
             } => {
                 let comp = invoker.get_component(component).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -121,11 +144,88 @@ fn resolve_tools(
                         component,
                     )
                 })?;
-                let tool = McpMapper::function_to_tool(
+
+                // Start with the WIT-derived Tool schema.
+                let mut tool = McpMapper::function_to_tool(
                     func,
                     &tool_config.name,
                     tool_config.description.as_deref(),
                 );
+
+                // Input-schema derivation runs when param-mapping or
+                // param-encoding is declared (the mapping reshapes the input)
+                // or when an explicit schema is supplied (to validate
+                // alignment). Otherwise, the WIT-derived schema stands.
+                let needs_derived_input = mapping.param_mapping.is_some()
+                    || mapping.param_encoding.is_some()
+                    || input_schema.is_some();
+                if needs_derived_input {
+                    let derived = schema::derive_input_schema(func, mapping).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Server '{}': tool '{}': input-schema derivation failed: {e}",
+                            server_config.name,
+                            tool_config.name,
+                        )
+                    })?;
+                    let final_input = if let Some(declared) = input_schema.as_ref() {
+                        schema::validate_structural_alignment(declared, &derived).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Server '{}': tool '{}': explicit input-schema does not align with derived schema: {e}",
+                                server_config.name,
+                                tool_config.name,
+                            )
+                        })?;
+                        declared.clone()
+                    } else {
+                        derived
+                    };
+                    tool.input_schema = Arc::new(
+                        final_input
+                            .as_object()
+                            .cloned()
+                            .expect("input-schema is an object"),
+                    );
+                }
+
+                let derived_output: Option<serde_json::Value> =
+                    schema::derive_output_schema(func, mapping).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Server '{}': tool '{}': output-schema derivation failed: {e}",
+                            server_config.name,
+                            tool_config.name,
+                        )
+                    })?;
+
+                // Apply the final output schema: explicit (validated against
+                // derived if both present) or derived.
+                let final_output_schema: Option<serde_json::Value> = match (
+                    output_schema.as_ref(),
+                    derived_output.as_ref(),
+                ) {
+                    (Some(declared), Some(derived)) => {
+                        schema::validate_structural_alignment(declared, derived).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Server '{}': tool '{}': explicit output-schema does not align with derived schema: {e}",
+                                server_config.name,
+                                tool_config.name,
+                            )
+                        })?;
+                        Some(declared.clone())
+                    }
+                    (Some(declared), None) => Some(declared.clone()),
+                    (None, Some(derived)) => Some(derived.clone()),
+                    (None, None) => None,
+                };
+
+                if let Some(schema) = final_output_schema
+                    .as_ref()
+                    .and_then(|s| s.as_object().cloned())
+                {
+                    tool = tool.with_raw_output_schema(schema.into());
+                } else {
+                    tool.output_schema = None;
+                }
+
                 let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
                 let input_validator = build_validator(
                     &server_config.name,
@@ -133,19 +233,41 @@ fn resolve_tools(
                     "input-schema",
                     &input_schema,
                 )?;
+                let output_validator = tool
+                    .output_schema
+                    .as_ref()
+                    .map(|s| {
+                        let schema = serde_json::Value::Object((**s).clone());
+                        build_validator(
+                            &server_config.name,
+                            &tool_config.name,
+                            "output-schema",
+                            &schema,
+                        )
+                    })
+                    .transpose()?;
+                let mapper =
+                    MessageMapper::from_component(comp, Some(function.clone()), mapping.clone())
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Server '{}': tool '{}': {e}",
+                                server_config.name,
+                                tool_config.name
+                            )
+                        })?;
                 let target = ResolvedToolTarget::Component {
-                    function: Box::new(func.clone()),
                     component_name: comp.metadata.name.clone(),
+                    mapper: Arc::new(mapper),
                 };
                 (
                     tool_config.name.clone(),
                     ResolvedTool {
                         tool,
                         input_validator,
-                        // Currently a WIT-derived schema. Will add validator
-                        // when config allows optional explicit output-schema.
-                        output_validator: None,
+                        output_validator,
                         target,
+                        propagate_request_meta: tool_config.propagate_request_meta.clone(),
+                        propagate_result_meta: tool_config.propagate_result_meta.clone(),
                     },
                 )
             }
@@ -190,6 +312,8 @@ fn resolve_tools(
                         input_validator,
                         output_validator,
                         target,
+                        propagate_request_meta: tool_config.propagate_request_meta.clone(),
+                        propagate_result_meta: tool_config.propagate_result_meta.clone(),
                     },
                 )
             }

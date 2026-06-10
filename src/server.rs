@@ -1,3 +1,25 @@
+//! MCP server: serves `tools/list` and `tools/call` over Streamable HTTP.
+//!
+//! On `tools/call`, the request flow is:
+//!
+//! 1. Build inbound Message from `arguments` (body) and `_meta` selected
+//!    by `propagate-request-meta` (headers).
+//! 2. For component-backed tools, the resolved `MessageMapper` applies
+//!    the inbound side of the WIT-bridging pipeline (`param-mapping`,
+//!    `param-encoding`), invokes the function, then applies the outbound
+//!    side (`result-decoding`, `result-mapping`) to produce a reply
+//!    Message. For channel-backed tools, the Message is published and
+//!    the reply Message is awaited. The subscription on the other side
+//!    runs the same pipeline.
+//! 3. Build the `CallToolResult` from the reply Message: body becomes
+//!    `structuredContent`, and headers selected by
+//!    `propagate-result-meta` are emitted as `_meta` entries (also on
+//!    the error path).
+//!
+//! Trace context is propagated through `_meta` `traceparent` on the
+//! request side and through the `PROPAGATION_CONTEXT` task-local on the
+//! component side.
+
 use anyhow::Result;
 use opentelemetry::KeyValue;
 use opentelemetry::propagation::TextMapPropagator;
@@ -23,7 +45,10 @@ use tokio::sync::watch;
 
 use crate::origin::{OriginPolicy, validate_origin};
 use crate::service::{ResolvedTool, ResolvedToolTarget};
-use composable_runtime::{ComponentInvoker, Function, MessagePublisher, PROPAGATED_HEADERS};
+use composable_runtime::{
+    ComponentInvoker, Message, MessageBuilder, MessageHeaders, MessagePublisher,
+    PROPAGATED_HEADERS, PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, schema,
+};
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -93,31 +118,6 @@ impl McpServer {
         Ok(())
     }
 
-    fn result_to_structured_content(
-        &self,
-        tool: &Tool,
-        raw_result: serde_json::Value,
-    ) -> serde_json::Value {
-        let parsed_result = if raw_result.is_string() {
-            serde_json::from_str::<serde_json::Value>(raw_result.as_str().unwrap())
-                .unwrap_or(raw_result)
-        } else {
-            raw_result
-        };
-
-        // Check if this is a wrapper schema (array or option) and wrap accordingly
-        if let Some(schema) = &tool.output_schema
-            && let Some(properties) = schema.get("properties").and_then(|p| p.as_object())
-            && properties.len() == 1
-            && let Some((property_name, property_schema)) = properties.iter().next()
-            && (property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
-                || property_schema.get("oneOf").is_some())
-        {
-            return serde_json::json!({ property_name: parsed_result });
-        }
-        parsed_result
-    }
-
     // Create an MCP server span following the gen_ai semantic conventions.
     // Returns the span and a propagation context map derived from it.
     //
@@ -184,6 +184,7 @@ impl McpServer {
         &self,
         tool_name: &str,
         arguments: &JsonObject,
+        meta: Option<&Meta>,
         context: Option<HashMap<String, String>>,
     ) -> CallToolResult {
         let Some(resolved) = self.tools.get(tool_name) else {
@@ -199,140 +200,273 @@ impl McpServer {
             ))]);
         }
 
-        match &resolved.target {
-            ResolvedToolTarget::Component {
-                function,
-                component_name,
-            } => {
-                self.handle_component_call(
-                    &resolved.tool,
-                    function,
+        // Build the inbound Message:
+        //   - body = arguments as JSON
+        //   - headers = declared propagate-request-meta entries
+        //     (plus the tracing keys merged within MessageBuilder)
+        let dispatch = async {
+            let message = match build_message_from_mcp_call(
+                arguments,
+                meta,
+                &resolved.propagate_request_meta,
+            ) {
+                Ok(m) => m,
+                Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+            };
+
+            let reply = match &resolved.target {
+                ResolvedToolTarget::Component {
                     component_name,
-                    arguments,
-                    context,
-                )
-                .await
-            }
-            ResolvedToolTarget::Channel { channel } => {
-                self.handle_channel_call(
-                    &resolved.tool,
-                    &resolved.output_validator,
-                    channel,
-                    arguments,
-                    context,
-                )
-                .await
-            }
-        }
-    }
-
-    async fn handle_component_call(
-        &self,
-        tool: &Tool,
-        function: &Function,
-        component_name: &str,
-        arguments: &JsonObject,
-        context: Option<HashMap<String, String>>,
-    ) -> CallToolResult {
-        // Prepare arguments in parameter order. Validation already enforced schema conformance.
-        let json_args: Vec<serde_json::Value> = function
-            .params()
-            .iter()
-            .map(|param| {
-                arguments
-                    .get(&param.name)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null)
-            })
-            .collect();
-
-        match self
-            .invoker
-            .invoke(component_name, &function.key(), json_args, context, None)
-            .await
-        {
-            Ok(result) => {
-                if tool.output_schema.is_some() {
-                    let structured_content = self.result_to_structured_content(tool, result);
-                    CallToolResult::structured(structured_content)
-                } else {
-                    let result_text = if result.is_string() {
-                        result.as_str().unwrap_or("").to_string()
-                    } else {
-                        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                    mapper,
+                } => {
+                    let invocation = match mapper.to_invocation(&message) {
+                        Ok(inv) => inv,
+                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
                     };
-                    CallToolResult::success(vec![Content::text(result_text)])
-                }
-            }
-            Err(error) => CallToolResult::error(vec![Content::text(error.to_string())]),
-        }
-    }
-
-    async fn handle_channel_call(
-        &self,
-        tool: &Tool,
-        output_validator: &Option<jsonschema::Validator>,
-        channel: &str,
-        arguments: &JsonObject,
-        context: Option<HashMap<String, String>>,
-    ) -> CallToolResult {
-        let Some(publisher) = &self.publisher else {
-            return CallToolResult::error(vec![Content::text(
-                "Channel-backed tools require messaging support".to_string(),
-            )]);
-        };
-
-        let body = match serde_json::to_vec(arguments) {
-            Ok(b) => b,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "Failed to serialize arguments: {e}"
-                ))]);
-            }
-        };
-
-        let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
-        if let Some(ctx) = context {
-            headers.extend(ctx);
-        }
-
-        let return_address = match publisher.publish_request(channel, body, headers).await {
-            Ok(ra) => ra,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "Failed to publish to channel '{channel}': {e}"
-                ))]);
-            }
-        };
-
-        match return_address.take().await {
-            Ok(reply) => {
-                let body = String::from_utf8_lossy(reply.body()).to_string();
-                if let Some(validator) = output_validator {
-                    match serde_json::from_str::<serde_json::Value>(&body) {
-                        Ok(json) => {
-                            if let Err(error) = validator.validate(&json) {
-                                return CallToolResult::error(vec![Content::text(format!(
-                                    "Reply from channel '{channel}' does not conform to output-schema: {error}"
-                                ))]);
-                            }
-                            let structured = self.result_to_structured_content(tool, json);
-                            CallToolResult::structured(structured)
+                    let wit_result = match self
+                        .invoker
+                        .invoke(
+                            component_name,
+                            invocation.function_key.as_str(),
+                            invocation.args,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CallToolResult::error(vec![Content::text(e.to_string())]);
                         }
-                        Err(e) => CallToolResult::error(vec![Content::text(format!(
-                            "Reply from channel '{channel}' is not valid JSON: {e}"
-                        ))]),
+                    };
+                    // Propagation entries (PROPAGATED_HEADERS) read from the
+                    // inbound Message carry into the reply Message.
+                    let propagated = propagated_headers(&message);
+                    match mapper.from_invocation_result(&wit_result, propagated) {
+                        Ok(m) => m,
+                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
                     }
-                } else {
-                    CallToolResult::success(vec![Content::text(body)])
                 }
+                ResolvedToolTarget::Channel { channel } => {
+                    let Some(publisher) = &self.publisher else {
+                        return CallToolResult::error(vec![Content::text(
+                            "Channel-backed tools require messaging support".to_string(),
+                        )]);
+                    };
+                    let return_address = match publisher.publish_request(channel, message).await {
+                        Ok(ra) => ra,
+                        Err(e) => {
+                            return CallToolResult::error(vec![Content::text(format!(
+                                "Failed to publish to channel '{channel}': {e}"
+                            ))]);
+                        }
+                    };
+                    match return_address.take().await {
+                        Ok(reply) => reply,
+                        Err(e) => {
+                            return CallToolResult::error(vec![Content::text(format!(
+                                "Failed to receive reply for request to channel '{channel}': {e}"
+                            ))]);
+                        }
+                    }
+                }
+            };
+
+            build_mcp_result_from_message(
+                reply,
+                &resolved.tool,
+                &resolved.output_validator,
+                &resolved.propagate_result_meta,
+            )
+        };
+
+        // Establish the propagation scope around dispatch so any Message
+        // construction in the scope picks up tracing keys via MessageBuilder's
+        // task-local auto-merge, and so downstream invocation has the context.
+        match context {
+            Some(entries) if !entries.is_empty() => {
+                let ctx = PropagationContext { entries };
+                PROPAGATION_CONTEXT.scope(Some(ctx), dispatch).await
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
-                "Failed to receive reply for request to channel '{channel}': {e}"
-            ))]),
+            _ => dispatch.await,
         }
     }
+}
+
+// Extract PROPAGATED_HEADERS from a Message into a HashMap.
+fn propagated_headers(msg: &Message) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for key in PROPAGATED_HEADERS {
+        if let Some(val) = msg.headers().get::<&str>(key) {
+            out.insert((*key).to_string(), val.to_string());
+        }
+    }
+    out
+}
+
+// Build a `Message` from an MCP `tools/call` invocation.
+//
+// - Body: `arguments` serialized as JSON, content-type `application/json`.
+// - Headers: for each `propagate-request-meta` entry, look up the source
+//   `_meta` key on the request and write its string value into the Message
+//   headers under the entry's target name (the source if no rename).
+//   Non-string `_meta` values are skipped with a warning.
+//
+// Well-known tracing keys (PROPAGATED_HEADERS) are not handled by this
+// helper. They flow via `MessageBuilder::build`'s task-local auto-merge
+// when the caller has established a `PROPAGATION_CONTEXT` scope around the
+// build site.
+fn build_message_from_mcp_call(
+    arguments: &JsonObject,
+    meta: Option<&Meta>,
+    propagate_request_meta: &[PropagatedHeader],
+) -> Result<Message, String> {
+    let body = serde_json::to_vec(arguments)
+        .map_err(|e| format!("failed to serialize MCP arguments: {e}"))?;
+
+    let mut builder =
+        MessageBuilder::new(body).header(MessageHeaders::CONTENT_TYPE, "application/json");
+
+    if let Some(m) = meta {
+        for entry in propagate_request_meta {
+            match m.0.get(entry.source()) {
+                Some(serde_json::Value::String(s)) => {
+                    builder = builder.header(entry.target(), s.as_str());
+                }
+                Some(other) => {
+                    tracing::warn!(
+                        meta_key = %entry.source(),
+                        value_type = ?other,
+                        "skipping non-string _meta entry declared in propagate-request-meta"
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+
+    Ok(builder.build())
+}
+
+// Build a `CallToolResult` from a reply `Message`.
+//
+// The reply Message body is expected to be JSON. MCP publishes channel
+// requests as JSON, and the subscription activator's
+// `from_invocation_result` produces a JSON-bodied reply.
+//
+// Behavior:
+// - If `tool.output_schema` is `None`: a text-content success result with
+//   the body as the raw string when it is a JSON string, otherwise a
+//   pretty-printed JSON form.
+// - If `tool.output_schema` is `Some`: parse the body as JSON, apply
+//   tolerant-reader coercion (`schema::coerce_value`), validate against the
+//   provided `output_validator` if present, and return a structured success
+//   result. When the output schema is a single `array`-typed or `oneOf`
+//   property, the body value is wrapped under that property name.
+//
+// `result<T, E>` to `isError` mapping is NOT handled here. The runtime's
+// `invoke` already returns `Err` for the WIT `err` arm; that surfaces in
+// the caller as a dispatch-level error, not as a payload to this helper.
+fn build_mcp_result_from_message(
+    msg: Message,
+    tool: &Tool,
+    output_validator: &Option<jsonschema::Validator>,
+    propagate_result_meta: &[PropagatedHeader],
+) -> CallToolResult {
+    // Compute the _meta entries to emit on the result, reading source Message
+    // headers and writing them under the entry's target name.
+    let mut result_meta_map = serde_json::Map::new();
+    for entry in propagate_result_meta {
+        if let Some(val) = msg.headers().get::<&str>(entry.source()) {
+            result_meta_map.insert(
+                entry.target().to_string(),
+                serde_json::Value::String(val.to_string()),
+            );
+        }
+    }
+    let result_meta = if result_meta_map.is_empty() {
+        None
+    } else {
+        Some(rmcp::model::Meta(result_meta_map))
+    };
+
+    let parsed: serde_json::Value = if msg.body().is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice(msg.body()) {
+            Ok(v) => v,
+            Err(e) => {
+                return apply_meta(
+                    CallToolResult::error(vec![Content::text(format!(
+                        "reply body is not valid JSON: {e}"
+                    ))]),
+                    result_meta,
+                );
+            }
+        }
+    };
+
+    let Some(schema) = tool.output_schema.as_ref() else {
+        let text = match &parsed {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+        };
+        return apply_meta(
+            CallToolResult::success(vec![Content::text(text)]),
+            result_meta,
+        );
+    };
+
+    let schema_value = serde_json::Value::Object((**schema).clone());
+
+    // McpMapper (schema-time) wraps WIT return types that JSON-render as
+    // a bare array or variant (oneOf) under a property name, since MCP
+    // `structuredContent` must be a JSON object. The property name comes
+    // from a pluralized item type name when available, or a literal
+    // fallback (`items`, `tuple`, `result`). When the advertised schema
+    // shows that wrapping (a single array-typed or oneOf-shaped
+    // property), wrap the runtime body the same way so coercion and
+    // validation operate on a value whose shape matches the schema.
+    let mut wrapped = if let Some(properties) =
+        schema_value.get("properties").and_then(|p| p.as_object())
+        && properties.len() == 1
+        && let Some((property_name, property_schema)) = properties.iter().next()
+        && (property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
+            || property_schema.get("oneOf").is_some())
+    {
+        serde_json::json!({ property_name: parsed })
+    } else {
+        parsed
+    };
+
+    if let Err(e) = schema::coerce_value(&mut wrapped, &schema_value) {
+        return apply_meta(
+            CallToolResult::error(vec![Content::text(format!(
+                "failed to coerce reply body to output-schema: {e}"
+            ))]),
+            result_meta,
+        );
+    }
+
+    if let Some(validator) = output_validator
+        && let Err(error) = validator.validate(&wrapped)
+    {
+        return apply_meta(
+            CallToolResult::error(vec![Content::text(format!(
+                "reply body does not conform to output-schema: {error}"
+            ))]),
+            result_meta,
+        );
+    }
+
+    apply_meta(CallToolResult::structured(wrapped), result_meta)
+}
+
+// Attach the optional Meta to a CallToolResult.
+fn apply_meta(mut result: CallToolResult, meta: Option<rmcp::model::Meta>) -> CallToolResult {
+    if meta.is_some() {
+        result.meta = meta;
+    }
+    result
 }
 
 // Extract gen_ai semantic convention attributes from the request context.
@@ -401,7 +535,9 @@ impl ServerHandler for McpServer {
         let context = span_ctx.as_ref().map(|(_, ctx)| ctx.clone());
 
         let (mut span, result) = {
-            let result = self.handle_tool_call(tool_name, &arguments, context).await;
+            let result = self
+                .handle_tool_call(tool_name, &arguments, meta, context)
+                .await;
             (span_ctx.map(|(span, _)| span), result)
         };
 
@@ -533,6 +669,347 @@ mod tests {
         };
     }
 
+    fn meta(value: serde_json::Value) -> Meta {
+        Meta(value.as_object().unwrap().clone())
+    }
+
+    #[test]
+    fn build_message_serializes_arguments_as_json_body() {
+        let arguments = args!({ "x": 5, "y": "hi" });
+        let msg = build_message_from_mcp_call(&arguments, None, &[]).unwrap();
+        assert_eq!(msg.headers().content_type(), Some("application/json"));
+        let parsed: serde_json::Value = serde_json::from_slice(msg.body()).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "x": 5, "y": "hi" }));
+    }
+
+    #[test]
+    fn build_message_attaches_declared_propagate_meta_entries() {
+        let arguments = args!({});
+        let m = meta(serde_json::json!({
+            "io.example.tools/foo": "bar",
+            "com.example.auth/token": "tok-123",
+            "dev.unrelated/key": "ignored"
+        }));
+        let propagate = vec![
+            PropagatedHeader::parse("io.example.tools/foo").unwrap(),
+            PropagatedHeader::parse("com.example.auth/token").unwrap(),
+        ];
+        let msg = build_message_from_mcp_call(&arguments, Some(&m), &propagate).unwrap();
+        assert_eq!(
+            msg.headers().get::<&str>("io.example.tools/foo"),
+            Some("bar")
+        );
+        assert_eq!(
+            msg.headers().get::<&str>("com.example.auth/token"),
+            Some("tok-123")
+        );
+        assert!(msg.headers().get::<&str>("dev.unrelated/key").is_none());
+    }
+
+    #[test]
+    fn build_message_skips_non_string_propagate_meta_entries() {
+        let arguments = args!({});
+        let m = meta(serde_json::json!({
+            "io.example/object-value": { "nested": 1 },
+            "io.example/string-value": "ok"
+        }));
+        let propagate = vec![
+            PropagatedHeader::parse("io.example/object-value").unwrap(),
+            PropagatedHeader::parse("io.example/string-value").unwrap(),
+        ];
+        let msg = build_message_from_mcp_call(&arguments, Some(&m), &propagate).unwrap();
+        assert!(
+            msg.headers()
+                .get::<&str>("io.example/object-value")
+                .is_none()
+        );
+        assert_eq!(
+            msg.headers().get::<&str>("io.example/string-value"),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn build_message_with_no_meta_and_no_propagate() {
+        let arguments = args!({ "a": 1 });
+        let msg = build_message_from_mcp_call(&arguments, None, &[]).unwrap();
+        // body and content-type only (plus id + timestamp from MessageBuilder).
+        assert_eq!(msg.headers().content_type(), Some("application/json"));
+        let parsed: serde_json::Value = serde_json::from_slice(msg.body()).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "a": 1 }));
+    }
+
+    // Build a Tool with the given output schema. Input schema is a trivial
+    // empty object since these tests don't exercise input validation.
+    fn tool_with_output_schema(output_schema: Option<serde_json::Value>) -> Tool {
+        let input_schema = serde_json::json!({ "type": "object" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut tool = Tool::new_with_raw("test".to_string(), Some("test".into()), input_schema)
+            .with_title("test".to_string());
+        if let Some(schema) = output_schema.and_then(|s| s.as_object().cloned()) {
+            tool = tool.with_raw_output_schema(schema.into());
+        }
+        tool
+    }
+
+    // Build a Message with the given JSON body.
+    fn reply_msg(body: serde_json::Value) -> Message {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        MessageBuilder::new(bytes)
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .build()
+    }
+
+    #[test]
+    fn build_result_no_schema_returns_text() {
+        let tool = tool_with_output_schema(None);
+        let msg = reply_msg(serde_json::json!({ "value": 42 }));
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        assert!(!r.is_error.unwrap_or(false));
+        let text = r.content[0].as_text().unwrap().text.clone();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "value": 42 }));
+    }
+
+    #[test]
+    fn build_result_no_schema_returns_string_body_raw() {
+        let tool = tool_with_output_schema(None);
+        let msg = reply_msg(serde_json::json!("hello, world"));
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        let text = r.content[0].as_text().unwrap().text.clone();
+        // A JSON string body returns the raw string, not JSON-quoted.
+        assert_eq!(text, "hello, world");
+    }
+
+    #[test]
+    fn build_result_with_object_schema_returns_structured() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let tool = tool_with_output_schema(Some(schema));
+        let msg = reply_msg(serde_json::json!({ "name": "Alice" }));
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        assert!(!r.is_error.unwrap_or(false));
+        let structured = r.structured_content.unwrap();
+        assert_eq!(structured, serde_json::json!({ "name": "Alice" }));
+    }
+
+    #[test]
+    fn build_result_coerces_via_schema_then_returns_structured() {
+        // Schema declares `kv` as string; body has it as an object.
+        // schema::coerce_value stringifies that nested value.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "kv": { "type": "string" }
+            }
+        });
+        let tool = tool_with_output_schema(Some(schema));
+        let msg = reply_msg(serde_json::json!({
+            "name": "Alice",
+            "kv": { "k": 1 }
+        }));
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        assert!(!r.is_error.unwrap_or(false));
+        let structured = r.structured_content.unwrap();
+        assert_eq!(structured["name"], serde_json::json!("Alice"));
+        assert_eq!(structured["kv"], serde_json::json!("{\"k\":1}"));
+    }
+
+    #[test]
+    fn build_result_with_oneof_wrapper_schema_and_validator_succeeds() {
+        // Wrapper shape from McpMapper for `option<T>`: single property
+        // (`result`) whose schema is oneOf [T, null]. The body returned
+        // by the WIT call is the bare oneOf value (e.g. a string or null);
+        // detection + wrap must produce `{ "result": <body> }` so it
+        // validates against the wrapped schema.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "result": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "required": ["result"]
+        });
+        let validator = Some(jsonschema::validator_for(&schema).unwrap());
+        let tool = tool_with_output_schema(Some(schema));
+        let body = serde_json::json!("hello");
+        let msg = reply_msg(body.clone());
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        assert!(
+            !r.is_error.unwrap_or(false),
+            "expected success, got error: {:?}",
+            r.content
+                .first()
+                .and_then(|c| c.as_text().map(|t| t.text.clone())),
+        );
+        let structured = r.structured_content.unwrap();
+        assert_eq!(structured, serde_json::json!({ "result": body }));
+    }
+
+    #[test]
+    fn build_result_with_array_wrapper_schema_and_validator_succeeds() {
+        // A WIT `list<T>` returns a bare array, but the schema advertised to
+        // MCP is the wrapped object (single property of array type).
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "users": {
+                    "type": "array",
+                    "items": { "type": "object" }
+                }
+            },
+            "required": ["users"]
+        });
+        let validator = Some(jsonschema::validator_for(&schema).unwrap());
+        let tool = tool_with_output_schema(Some(schema));
+        let body = serde_json::json!([{ "name": "Alice" }, { "name": "Bob" }]);
+        let msg = reply_msg(body.clone());
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        assert!(
+            !r.is_error.unwrap_or(false),
+            "expected success, got error: {:?}",
+            r.content
+                .first()
+                .and_then(|c| c.as_text().map(|t| t.text.clone())),
+        );
+        let structured = r.structured_content.unwrap();
+        assert_eq!(structured, serde_json::json!({ "users": body }));
+    }
+
+    #[test]
+    fn build_result_with_validator_rejects_non_conformant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let validator = Some(jsonschema::validator_for(&schema).unwrap());
+        let tool = tool_with_output_schema(Some(schema));
+        // Body lacks the required `name` property.
+        let msg = reply_msg(serde_json::json!({ "wrong": "field" }));
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        assert!(r.is_error.unwrap_or(false));
+        let text = r.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("does not conform to output-schema"),
+            "unexpected error text: {text}"
+        );
+    }
+
+    #[test]
+    fn build_result_with_validator_accepts_conformant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let validator = Some(jsonschema::validator_for(&schema).unwrap());
+        let tool = tool_with_output_schema(Some(schema));
+        let msg = reply_msg(serde_json::json!({ "name": "Alice" }));
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        assert!(!r.is_error.unwrap_or(false));
+    }
+
+    #[test]
+    fn build_result_invalid_json_body_is_error() {
+        let tool = tool_with_output_schema(None);
+        let msg = MessageBuilder::new(b"not json".to_vec())
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .build();
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        assert!(r.is_error.unwrap_or(false));
+        let text = r.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("reply body is not valid JSON"),
+            "unexpected error text: {text}"
+        );
+    }
+
+    #[test]
+    fn build_result_propagates_result_meta_identity() {
+        let tool = tool_with_output_schema(None);
+        // Reply Message carries `x-ratelimit-remaining` as a header;
+        // propagate-result-meta lifts it onto the CallToolResult `_meta` under
+        // the same name.
+        let msg = MessageBuilder::new(b"{}".to_vec())
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .header("x-ratelimit-remaining", "42")
+            .build();
+        let propagate = vec![PropagatedHeader::parse("x-ratelimit-remaining").unwrap()];
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let meta = r.meta.expect("expected result.meta to be set");
+        assert_eq!(
+            meta.0.get("x-ratelimit-remaining"),
+            Some(&serde_json::Value::String("42".to_string()))
+        );
+    }
+
+    #[test]
+    fn build_result_propagates_result_meta_with_rename() {
+        let tool = tool_with_output_schema(None);
+        let msg = MessageBuilder::new(b"{}".to_vec())
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .header("x-ratelimit-remaining", "42")
+            .build();
+        let propagate = vec![
+            PropagatedHeader::parse(
+                "x-ratelimit-remaining as com.example.tools/ratelimit-remaining",
+            )
+            .unwrap(),
+        ];
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let meta = r.meta.expect("expected result.meta to be set");
+        assert_eq!(
+            meta.0.get("com.example.tools/ratelimit-remaining"),
+            Some(&serde_json::Value::String("42".to_string()))
+        );
+        assert!(meta.0.get("x-ratelimit-remaining").is_none());
+    }
+
+    #[test]
+    fn build_result_propagate_result_meta_skips_missing_headers() {
+        let tool = tool_with_output_schema(None);
+        let msg = MessageBuilder::new(b"{}".to_vec())
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .build();
+        // Declared but no matching header on the reply Message; no _meta
+        // entry should be emitted (and result.meta should stay None).
+        let propagate = vec![PropagatedHeader::parse("x-not-present").unwrap()];
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        assert!(r.meta.is_none());
+    }
+
+    #[test]
+    fn build_result_propagate_result_meta_attaches_on_error_path() {
+        // Even when the result is an error, propagate-result-meta entries
+        // should still be emitted on the result's _meta.
+        let tool = tool_with_output_schema(None);
+        let msg = MessageBuilder::new(b"not json".to_vec())
+            .header(MessageHeaders::CONTENT_TYPE, "application/json")
+            .header("x-trace", "abc")
+            .build();
+        let propagate = vec![PropagatedHeader::parse("x-trace").unwrap()];
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        assert!(r.is_error.unwrap_or(false));
+        let meta = r
+            .meta
+            .expect("expected result.meta to be set even on error");
+        assert_eq!(
+            meta.0.get("x-trace"),
+            Some(&serde_json::Value::String("abc".to_string()))
+        );
+    }
+
     fn create_wasm(wat_content: &str) -> tempfile::NamedTempFile {
         let bytes = wat::parse_str(wat_content).unwrap();
         let mut f = Builder::new().suffix(".wasm").tempfile().unwrap();
@@ -569,9 +1046,15 @@ mod tests {
                 let tool = McpMapper::function_to_tool(function, &tool_name, None);
                 let schema = serde_json::Value::Object((*tool.input_schema).clone());
                 let input_validator = jsonschema::validator_for(&schema).unwrap();
+                let mapper = composable_runtime::MessageMapper::from_component(
+                    component,
+                    Some(function.key()),
+                    composable_runtime::MappingConfig::default(),
+                )
+                .unwrap();
                 let target = ResolvedToolTarget::Component {
-                    function: Box::new(function.clone()),
                     component_name: component.metadata.name.clone(),
+                    mapper: Arc::new(mapper),
                 };
                 tools.insert(
                     tool_name,
@@ -580,6 +1063,8 @@ mod tests {
                         input_validator,
                         output_validator: None,
                         target,
+                        propagate_request_meta: Vec::new(),
+                        propagate_result_meta: Vec::new(),
                     },
                 );
             }
@@ -640,10 +1125,7 @@ mod tests {
             anyhow::Ok(())
         });
 
-        let client = TestClientHandler::default()
-            .serve(client_transport)
-            .await
-            .unwrap();
+        let client = TestClientHandler.serve(client_transport).await.unwrap();
 
         TestClient {
             client: Some(client),

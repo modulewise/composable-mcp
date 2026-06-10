@@ -744,8 +744,8 @@ dependencies = [
 
 [[package]]
 name = "composable-interceptor"
-version = "0.5.0-alpha.3"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#e05d665ad4b09ae15b0f614e194844cca2729e92"
+version = "0.5.0-alpha.4"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#530220d642ffe51875335f2d054b858ecec951ba"
 dependencies = [
  "anyhow",
  "clap",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "composable-mcp"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -782,8 +782,8 @@ dependencies = [
 
 [[package]]
 name = "composable-otel"
-version = "0.5.0-alpha.3"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#e05d665ad4b09ae15b0f614e194844cca2729e92"
+version = "0.5.0-alpha.4"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#530220d642ffe51875335f2d054b858ecec951ba"
 dependencies = [
  "anyhow",
  "composable-runtime",
@@ -800,8 +800,8 @@ dependencies = [
 
 [[package]]
 name = "composable-runtime"
-version = "0.5.0-alpha.3"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#e05d665ad4b09ae15b0f614e194844cca2729e92"
+version = "0.5.0-alpha.4"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#530220d642ffe51875335f2d054b858ecec951ba"
 dependencies = [
  "anyhow",
  "clap",
