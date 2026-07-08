@@ -1,0 +1,16 @@
+[package]
+name = "mcp-tool-example"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "mcp-tool-example"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+composable-otel = { git = "https://github.com/modulewise/composable-runtime", branch = "main" }
+composable-runtime = { git = "https://github.com/modulewise/composable-runtime", branch = "main" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

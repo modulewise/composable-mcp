@@ -11,6 +11,7 @@ wit_bindgen::generate!({
 use composable::http::client::HttpResponse;
 use composable::mcp::types::*;
 use wasi::logging::logging::{Level, log};
+use wit_bindgen::rt::async_support::spawn_local;
 
 struct Client;
 
@@ -30,7 +31,7 @@ pub struct Session {
 }
 
 impl exports::composable::mcp::client::GuestSession for Session {
-    fn initialize(
+    async fn initialize(
         server_url: String,
         request: Option<InitializeRequest>,
     ) -> Result<exports::composable::mcp::client::Session, String> {
@@ -39,9 +40,11 @@ impl exports::composable::mcp::client::GuestSession for Session {
             "Initializing MCP session with server: {}",
             server_url
         ));
-        let init_response = initialize_session(&server_url, request).inspect_err(|e| {
-            log_error(&format!("Failed to initialize MCP session: {}", e));
-        })?;
+        let init_response = initialize_session(&server_url, request)
+            .await
+            .inspect_err(|e| {
+                log_error(&format!("Failed to initialize MCP session: {}", e));
+            })?;
         // Any error on initialize returns an Err result, not an error payload.
         let init_result = match &init_response.payload {
             InitializePayload::Result(r) => r,
@@ -73,7 +76,10 @@ impl exports::composable::mcp::client::GuestSession for Session {
         self.init_response.clone()
     }
 
-    fn list_tools(&self, request: Option<ListToolsRequest>) -> Result<ListToolsResponse, String> {
+    async fn list_tools(
+        &self,
+        request: Option<ListToolsRequest>,
+    ) -> Result<ListToolsResponse, String> {
         let request_id = self.next_request_id();
         log_info(&format!(
             "Listing tools from server: {}, session_id: {}, request_id: {}",
@@ -110,8 +116,10 @@ impl exports::composable::mcp::client::GuestSession for Session {
             request_body.as_bytes(),
             Some(&self.session_id),
             Some(&self.protocol_version),
-        )?;
+        )
+        .await?;
 
+        let body = body.collect().await;
         let response_body = String::from_utf8_lossy(&body);
         log_debug(&format!(
             "tools/list response body length: {}",
@@ -162,7 +170,7 @@ impl exports::composable::mcp::client::GuestSession for Session {
         })
     }
 
-    fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
+    async fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
         let request_id = self.next_request_id();
         log_info(&format!(
             "Calling tool '{}' on server: {}, session_id: {}, request_id: {}",
@@ -200,8 +208,10 @@ impl exports::composable::mcp::client::GuestSession for Session {
             request_body.as_bytes(),
             Some(&self.session_id),
             Some(&self.protocol_version),
-        )?;
+        )
+        .await?;
 
+        let body = body.collect().await;
         let response_body = String::from_utf8_lossy(&body);
         log_debug(&format!("tools/call response body: {}", response_body));
 
@@ -230,6 +240,24 @@ impl exports::composable::mcp::client::GuestSession for Session {
             payload: CallToolPayload::Result(call_result),
         })
     }
+
+    async fn close(&self) {
+        log_info(&format!(
+            "Terminating MCP session {} on server: {}",
+            self.session_id, self.server_url
+        ));
+
+        let headers = vec![("MCP-Session-Id".to_string(), self.session_id.clone())];
+
+        match composable::http::client::delete(self.server_url.clone(), headers, None).await {
+            Ok(response) => {
+                log_debug(&format!("Terminate response status: {}", response.status));
+            }
+            Err(e) => {
+                log_error(&format!("Terminate request failed: {}", e));
+            }
+        }
+    }
 }
 
 impl Session {
@@ -242,7 +270,8 @@ impl Session {
 
 // POST to the MCP server with the standard Content-Type and Accept headers.
 // Include the MCP-Session-Id and MCP-Protocol-Version headers when available.
-fn post(
+// The request body is streamed via the http-client's stream<u8> input.
+async fn post(
     url: &str,
     body: &[u8],
     session_id: Option<&str>,
@@ -268,34 +297,22 @@ fn post(
 
     log_debug(&format!("HTTP POST headers: {:?}", headers));
 
-    let response = client::post(url, &headers, body, None).map_err(|e| {
-        log_error(&format!("HTTP request failed: {}", e));
-        e
-    })?;
+    let (mut body_tx, body_rx) = wit_stream::new::<u8>();
+    let body_bytes = body.to_vec();
+    spawn_local(async move {
+        let _ = body_tx.write_all(body_bytes).await;
+    });
+
+    let response = client::post(url.to_string(), headers, body_rx, None)
+        .await
+        .map_err(|e| {
+            log_error(&format!("HTTP request failed: {}", e));
+            e
+        })?;
 
     log_debug(&format!("HTTP response status: {}", response.status));
 
     Ok(response)
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        log_info(&format!(
-            "Terminating MCP session {} on server: {}",
-            self.session_id, self.server_url
-        ));
-
-        let headers = vec![("MCP-Session-Id".to_string(), self.session_id.clone())];
-
-        match composable::http::client::delete(&self.server_url, &headers, None) {
-            Ok(response) => {
-                log_debug(&format!("Terminate response status: {}", response.status));
-            }
-            Err(e) => {
-                log_error(&format!("Terminate request failed: {}", e));
-            }
-        }
-    }
 }
 
 fn validate_server_url(server_url: &str) -> Result<(), String> {
@@ -317,7 +334,7 @@ impl Default for InitializeRequest {
 }
 
 // Initialize session with the MCP server.
-fn initialize_session(
+async fn initialize_session(
     server_url: &str,
     request: Option<InitializeRequest>,
 ) -> Result<InitializeResponse, String> {
@@ -375,8 +392,9 @@ fn initialize_session(
         headers,
         body,
         ..
-    } = post(server_url, request_body.as_bytes(), None, None)?;
+    } = post(server_url, request_body.as_bytes(), None, None).await?;
 
+    let body = body.collect().await;
     let response_body = String::from_utf8_lossy(&body);
     log_debug(&format!(
         "Initialize response status: {}, body: {}",
@@ -465,7 +483,8 @@ fn initialize_session(
         notification_body.as_bytes(),
         Some(&session_id),
         Some(&server_protocol_version),
-    )?;
+    )
+    .await?;
 
     log_debug("Session initialization complete");
     Ok(InitializeResponse {

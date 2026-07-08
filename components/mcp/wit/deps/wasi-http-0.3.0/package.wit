@@ -1,10 +1,7 @@
-package wasi:http@0.2.6;
+package wasi:http@0.3.0;
 
 interface types {
-  use wasi:clocks/monotonic-clock@0.2.6.{duration};
-  use wasi:io/streams@0.2.6.{input-stream, output-stream};
-  use wasi:io/error@0.2.6.{error as io-error};
-  use wasi:io/poll@0.2.6.{pollable};
+  use wasi:clocks/types@0.3.0.{duration};
 
   variant method {
     get,
@@ -86,11 +83,17 @@ interface types {
     invalid-syntax,
     forbidden,
     immutable,
+    size-exceeded,
+    other(option<string>),
   }
 
-  type field-key = string;
+  variant request-options-error {
+    not-supported,
+    immutable,
+    other(option<string>),
+  }
 
-  type field-name = field-key;
+  type field-name = string;
 
   type field-value = list<u8>;
 
@@ -101,8 +104,9 @@ interface types {
     has: func(name: field-name) -> bool;
     set: func(name: field-name, value: list<field-value>) -> result<_, header-error>;
     delete: func(name: field-name) -> result<_, header-error>;
+    get-and-delete: func(name: field-name) -> result<list<field-value>, header-error>;
     append: func(name: field-name, value: field-value) -> result<_, header-error>;
-    entries: func() -> list<tuple<field-name, field-value>>;
+    copy-all: func() -> list<tuple<field-name, field-value>>;
     clone: func() -> fields;
   }
 
@@ -110,86 +114,46 @@ interface types {
 
   type trailers = fields;
 
-  resource incoming-request {
-    method: func() -> method;
-    path-with-query: func() -> option<string>;
-    scheme: func() -> option<scheme>;
-    authority: func() -> option<string>;
-    headers: func() -> headers;
-    consume: func() -> result<incoming-body>;
-  }
-
-  resource outgoing-request {
-    constructor(headers: headers);
-    body: func() -> result<outgoing-body>;
-    method: func() -> method;
+  resource request {
+    new: static func(headers: headers, contents: option<stream<u8>>, trailers: future<result<option<trailers>, error-code>>, options: option<request-options>) -> tuple<request, future<result<_, error-code>>>;
+    get-method: func() -> method;
     set-method: func(method: method) -> result;
-    path-with-query: func() -> option<string>;
+    get-path-with-query: func() -> option<string>;
     set-path-with-query: func(path-with-query: option<string>) -> result;
-    scheme: func() -> option<scheme>;
+    get-scheme: func() -> option<scheme>;
     set-scheme: func(scheme: option<scheme>) -> result;
-    authority: func() -> option<string>;
+    get-authority: func() -> option<string>;
     set-authority: func(authority: option<string>) -> result;
-    headers: func() -> headers;
+    get-options: func() -> option<request-options>;
+    get-headers: func() -> headers;
+    consume-body: static func(this: request, res: future<result<_, error-code>>) -> tuple<stream<u8>, future<result<option<trailers>, error-code>>>;
   }
 
   resource request-options {
     constructor();
-    connect-timeout: func() -> option<duration>;
-    set-connect-timeout: func(duration: option<duration>) -> result;
-    first-byte-timeout: func() -> option<duration>;
-    set-first-byte-timeout: func(duration: option<duration>) -> result;
-    between-bytes-timeout: func() -> option<duration>;
-    set-between-bytes-timeout: func(duration: option<duration>) -> result;
-  }
-
-  resource response-outparam {
-    send-informational: func(status: u16, headers: headers) -> result<_, error-code>;
-    set: static func(param: response-outparam, response: result<outgoing-response, error-code>);
+    get-connect-timeout: func() -> option<duration>;
+    set-connect-timeout: func(duration: option<duration>) -> result<_, request-options-error>;
+    get-first-byte-timeout: func() -> option<duration>;
+    set-first-byte-timeout: func(duration: option<duration>) -> result<_, request-options-error>;
+    get-between-bytes-timeout: func() -> option<duration>;
+    set-between-bytes-timeout: func(duration: option<duration>) -> result<_, request-options-error>;
+    clone: func() -> request-options;
   }
 
   type status-code = u16;
 
-  resource incoming-response {
-    status: func() -> status-code;
-    headers: func() -> headers;
-    consume: func() -> result<incoming-body>;
-  }
-
-  resource incoming-body {
-    %stream: func() -> result<input-stream>;
-    finish: static func(this: incoming-body) -> future-trailers;
-  }
-
-  resource future-trailers {
-    subscribe: func() -> pollable;
-    get: func() -> option<result<result<option<trailers>, error-code>>>;
-  }
-
-  resource outgoing-response {
-    constructor(headers: headers);
-    status-code: func() -> status-code;
+  resource response {
+    new: static func(headers: headers, contents: option<stream<u8>>, trailers: future<result<option<trailers>, error-code>>) -> tuple<response, future<result<_, error-code>>>;
+    get-status-code: func() -> status-code;
     set-status-code: func(status-code: status-code) -> result;
-    headers: func() -> headers;
-    body: func() -> result<outgoing-body>;
+    get-headers: func() -> headers;
+    consume-body: static func(this: response, res: future<result<_, error-code>>) -> tuple<stream<u8>, future<result<option<trailers>, error-code>>>;
   }
-
-  resource outgoing-body {
-    write: func() -> result<output-stream>;
-    finish: static func(this: outgoing-body, trailers: option<trailers>) -> result<_, error-code>;
-  }
-
-  resource future-incoming-response {
-    subscribe: func() -> pollable;
-    get: func() -> option<result<result<incoming-response, error-code>>>;
-  }
-
-  http-error-code: func(err: borrow<io-error>) -> option<error-code>;
 }
 
-interface outgoing-handler {
-  use types.{outgoing-request, request-options, future-incoming-response, error-code};
+interface client {
+  use types.{request, response, error-code};
 
-  handle: func(request: outgoing-request, options: option<request-options>) -> result<future-incoming-response, error-code>;
+  send: async func(request: request) -> result<response, error-code>;
 }
 

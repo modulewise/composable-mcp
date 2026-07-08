@@ -1,0 +1,34 @@
+[component.mcp-tool]
+uri = "../../components/lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3001/mcp"
+config.tool-name = "calculator.multiply"
+
+[component.mcp-client]
+uri = "../../components/lib/mcp-client.wasm"
+imports = ["http-client", "logger"]
+
+[component.http-client]
+uri = "../../components/lib/http-client.wasm"
+imports = ["http"]
+
+[component.logger]
+uri = "../../components/lib/wasi-logging-to-stdout.wasm"
+imports = ["stdout-to-stderr", "io", "clocks"]
+
+[component.stdout-to-stderr]
+uri = "../../components/lib/stdout-to-stderr.wasm"
+imports = ["io", "cli"]
+
+[capability.http]
+type = "wasi:http"
+
+[capability.io]
+type = "wasi:io-p2"
+
+[capability.clocks]
+type = "wasi:clocks-p2"
+
+[capability.cli]
+type = "wasi:cli-p2"
+inherit-stderr = true

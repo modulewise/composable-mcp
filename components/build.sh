@@ -2,7 +2,7 @@
 
 if [ ! -f lib/http-client.wasm ]; then
   echo "Fetching http-client component..."
-  wkg oci pull ghcr.io/modulewise/component/http-client:0.1.0 -o lib/http-client.wasm
+  wkg oci pull ghcr.io/modulewise/component/http-client:0.2.0 -o lib/http-client.wasm
 fi
 if [ ! -f lib/wasi-logging-to-stdout.wasm ]; then
   echo "Fetching WASI logging component..."
