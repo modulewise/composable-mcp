@@ -1,4 +1,4 @@
-package composable:mcp@0.2.0;
+package composable:mcp@0.3.0;
 
 interface types {
     /// JSON Schema as string.
@@ -228,8 +228,8 @@ interface client {
 
     /// An active MCP session. Encapsulates the connection state (server URL,
     /// session id, negotiated protocol version, monotonic request-id counter).
-    /// Dropping the handle should trigger a best-effort HTTP DELETE to
-    /// terminate the session on the server.
+    /// Call `close` to terminate the session on the server (a best-effort HTTP
+    /// DELETE).
     ///
     /// There are three error layers:
     /// - Transport failure: returned via the `result<..., string>` error arm.
@@ -241,7 +241,7 @@ interface client {
         /// Initialize a connection to an MCP server. Returns a session handle
         /// on success. A JSON-RPC protocol error during initialize is treated
         /// as failure (no session is created) and returned via the outer Err.
-        initialize: static func(server-url: string, request: option<initialize-request>) -> result<session, string>;
+        initialize: static async func(server-url: string, request: option<initialize-request>) -> result<session, string>;
 
         /// Return the JSON-RPC response from the initialize call. The payload
         /// should always be the `result` variant in practice, since a proper
@@ -249,16 +249,19 @@ interface client {
         initialize-response: func() -> initialize-response;
 
         /// List available tools from the MCP server.
-        list-tools: func(request: option<list-tools-request>) -> result<list-tools-response, string>;
+        list-tools: async func(request: option<list-tools-request>) -> result<list-tools-response, string>;
 
         /// Call a tool.
-        call-tool: func(request: call-tool-request) -> result<call-tool-response, string>;
+        call-tool: async func(request: call-tool-request) -> result<call-tool-response, string>;
+
+        /// Terminate the session on the server (best-effort HTTP DELETE).
+        close: async func();
     }
 }
 
 world mcp-client {
     export client;
-    import composable:http/client@0.1.0;
+    import composable:http/client@0.2.0;
     import wasi:logging/logging@0.1.0-draft;
 }
 
@@ -269,4 +272,20 @@ world mcp-client-otel-interceptor {
     import wasi:otel/types@0.2.0-rc.2+patch;
     import wasi:clocks/wall-clock@0.2.6;
     import wasi:random/random@0.2.6;
+}
+
+/// A single named tool on a remote MCP server.
+/// The server URL and tool name come from configuration.
+world mcp-tool {
+    export composable:tools/tool@0.1.0;
+    import client;
+    import wasi:config/store@0.2.0-rc.1;
+}
+
+/// A set of tools on a single remote MCP server.
+/// The server URL comes from configuration.
+world mcp-toolset {
+    export composable:tools/toolset@0.1.0;
+    import client;
+    import wasi:config/store@0.2.0-rc.1;
 }

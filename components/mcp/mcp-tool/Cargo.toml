@@ -1,8 +1,8 @@
 [package]
-name = "mcp-client"
+name = "mcp-tool"
 version = "0.3.0"
 edition = "2024"
-description = "MCP client component implementing the composable:mcp/client interface"
+description = "MCP Tool component implementing the composable:tools/tool interface"
 homepage = "https://github.com/modulewise/composable-mcp/tree/main/components/mcp"
 license = "Apache-2.0"
 repository = "https://github.com/modulewise/composable-mcp"

@@ -1,0 +1,63 @@
+package composable:http@0.2.0;
+
+interface client {
+  enum method {
+    get,
+    post,
+    put,
+    delete,
+    patch,
+    head,
+    options,
+  }
+
+  /// Per-request options. None fields fall through to host defaults.
+  record request-options {
+    connect-timeout-ms: option<u32>,
+    first-byte-timeout-ms: option<u32>,
+    between-bytes-timeout-ms: option<u32>,
+  }
+
+  /// A streaming HTTP response. The status and headers are available
+  /// immediately; the body streams as `body`, and trailers (if any) resolve
+  /// via `trailers` once the body stream is fully consumed.
+  record http-response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: stream<u8>,
+    trailers: future<result<list<tuple<string, string>>, string>>,
+  }
+
+  /// Send an HTTP request with an explicit method. Both the request body and
+  /// the response body stream.
+  request: async func(method: method, url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP GET request.
+  get: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP POST request.
+  post: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP PUT request.
+  put: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP DELETE request.
+  delete: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP PATCH request.
+  patch: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP HEAD request.
+  head: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, string>;
+
+  /// HTTP OPTIONS request.
+  options: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, string>;
+}
+
+world http-client {
+  import wasi:clocks/types@0.3.0;
+  import wasi:http/types@0.3.0;
+  import wasi:http/client@0.3.0;
+
+  export client;
+}

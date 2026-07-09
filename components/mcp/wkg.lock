@@ -7,9 +7,9 @@ name = "composable:http"
 registry = "modulewise"
 
 [[packages.versions]]
-requirement = "=0.1.0"
-version = "0.1.0"
-digest = "sha256:38a8a8cb898dabc883f46efcf5d832b0f62f2983eeaa953f083b66693f711a0c"
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:afaa68255e940f7eadce05055dd706efc7c90adfdb22884708e8d580174be241"
 
 [[packages]]
 name = "wasi:clocks"
@@ -19,6 +19,15 @@ registry = "wasi.dev"
 requirement = "=0.2.6"
 version = "0.2.6"
 digest = "sha256:569984cc45d3f5a362a3b2897aabbaa3cc4184a6113bfcbbf03c1bd7fc20338c"
+
+[[packages]]
+name = "wasi:config"
+registry = "wasi.dev"
+
+[[packages.versions]]
+requirement = "=0.2.0-rc.1"
+version = "0.2.0-rc.1"
+digest = "sha256:1b7f1b0fd07bb4cede16c6a6ec8852815dfb924639a78735fc7bdffdc164485d"
 
 [[packages]]
 name = "wasi:logging"

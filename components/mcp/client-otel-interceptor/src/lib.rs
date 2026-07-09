@@ -4,12 +4,14 @@ wit_bindgen::generate!({
     generate_all
 });
 
+use std::future::Future;
+
 use composable::mcp::client::Session as TargetSession;
 use composable::mcp::types::{
     CallToolPayload, CallToolRequest, CallToolResponse, InitializePayload, InitializeRequest,
     InitializeResponse, ListToolsPayload, ListToolsRequest, ListToolsResponse,
 };
-use wasi::clocks::wall_clock;
+use wasi::clocks0_2_6::wall_clock;
 use wasi::otel::{tracing, types};
 
 struct Interceptor;
@@ -28,7 +30,7 @@ pub struct InterceptedSession {
 }
 
 impl exports::composable::mcp::client::GuestSession for InterceptedSession {
-    fn initialize(
+    async fn initialize(
         server_url: String,
         request: Option<InitializeRequest>,
     ) -> Result<exports::composable::mcp::client::Session, String> {
@@ -47,7 +49,8 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                 let mut meta = req.meta.unwrap_or_default();
                 inject_trace_context(&mut meta, traceparent, tracestate);
                 req.meta = Some(meta);
-                TargetSession::initialize(&server_url, Some(&req))
+                let server_url = server_url.clone();
+                async move { TargetSession::initialize(server_url, Some(req)).await }
             },
             |result, attrs| match result {
                 Ok(target_session) => {
@@ -64,7 +67,8 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                     tracing::Status::Error(err.clone())
                 }
             },
-        )?;
+        )
+        .await?;
 
         let response = target.initialize_response();
         let (session_id, protocol_version) = match &response.payload {
@@ -88,7 +92,10 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
         self.target.initialize_response()
     }
 
-    fn list_tools(&self, request: Option<ListToolsRequest>) -> Result<ListToolsResponse, String> {
+    async fn list_tools(
+        &self,
+        request: Option<ListToolsRequest>,
+    ) -> Result<ListToolsResponse, String> {
         let mut initial_attributes = Vec::new();
         if let Some(ref sid) = self.session_id {
             initial_attributes.push(kv("mcp.session.id", sid));
@@ -110,7 +117,7 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                 let mut meta = req.meta.unwrap_or_default();
                 inject_trace_context(&mut meta, traceparent, tracestate);
                 req.meta = Some(meta);
-                self.target.list_tools(Some(&req))
+                async move { self.target.list_tools(Some(req)).await }
             },
             |result, attrs| match result {
                 Ok(response) => {
@@ -132,9 +139,10 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                 }
             },
         )
+        .await
     }
 
-    fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
+    async fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
         let name = request.name.clone();
         let mut initial_attributes = vec![
             kv("gen_ai.operation.name", "execute_tool"),
@@ -157,7 +165,7 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                 let mut meta = req.meta.unwrap_or_default();
                 inject_trace_context(&mut meta, traceparent, tracestate);
                 req.meta = Some(meta);
-                self.target.call_tool(&req)
+                async move { self.target.call_tool(req).await }
             },
             |result, attrs| match result {
                 Ok(response) => {
@@ -183,6 +191,11 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                 }
             },
         )
+        .await
+    }
+
+    async fn close(&self) {
+        self.target.close().await;
     }
 }
 
@@ -243,7 +256,7 @@ fn parse_server_address(server_url: &str) -> (String, Option<u16>) {
 // The `mcp.method.name`, `server.address`, and `server.port` attributes are
 // added by the helper, and `initial_attributes` includes the input-derived
 // attributes that the caller knows before making this call.
-fn traced_call<R, DoCall, Finalize>(
+async fn traced_call<R, DoCall, Fut, Finalize>(
     method_name: &str,
     span_name: String,
     server_url: &str,
@@ -252,7 +265,8 @@ fn traced_call<R, DoCall, Finalize>(
     finalize: Finalize,
 ) -> Result<R, String>
 where
-    DoCall: FnOnce(String, Option<String>) -> Result<R, String>,
+    DoCall: FnOnce(String, Option<String>) -> Fut,
+    Fut: Future<Output = Result<R, String>>,
     Finalize: FnOnce(&Result<R, String>, &mut Vec<tracing::KeyValue>) -> tracing::Status,
 {
     let outer = tracing::outer_span_context();
@@ -309,7 +323,7 @@ where
         )
     };
 
-    let result = do_call(traceparent, tracestate);
+    let result = do_call(traceparent, tracestate).await;
 
     let end = wall_clock::now();
 

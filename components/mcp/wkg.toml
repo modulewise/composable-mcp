@@ -1,2 +1,3 @@
 [overrides]
 "wasi:otel" = { path = "./wit/overrides/wasi-otel" }
+"composable:tools" = { path = "../tools/wit" }

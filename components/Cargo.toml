@@ -2,9 +2,11 @@
 members = [
     "mcp/client",
     "mcp/client-otel-interceptor",
+    "mcp/mcp-tool",
+    "mcp/mcp-toolset",
 ]
 resolver = "3"
 
 [workspace.dependencies]
 url = "2.5"
-wit-bindgen = "0.57"
+wit-bindgen = "0.58"
