@@ -46,14 +46,14 @@ use tokio::sync::watch;
 use crate::origin::{OriginPolicy, validate_origin};
 use crate::service::{ResolvedTool, ResolvedToolTarget};
 use composable_runtime::{
-    ComponentInvoker, Message, MessageBuilder, MessageHeaders, MessagePublisher,
-    PROPAGATED_HEADERS, PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, schema,
+    ComponentHost, Message, MessageBuilder, MessageHeaders, MessagePublisher, PROPAGATED_HEADERS,
+    PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, Val, schema,
 };
 
 #[derive(Clone)]
 pub struct McpServer {
     tools: HashMap<String, ResolvedTool>,
-    invoker: Arc<dyn ComponentInvoker>,
+    component_host: Arc<dyn ComponentHost>,
     publisher: Option<Arc<dyn MessagePublisher>>,
     addr: SocketAddr,
     origin_policy: OriginPolicy,
@@ -63,7 +63,7 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(
         tools: HashMap<String, ResolvedTool>,
-        invoker: Arc<dyn ComponentInvoker>,
+        component_host: Arc<dyn ComponentHost>,
         publisher: Option<Arc<dyn MessagePublisher>>,
         addr: SocketAddr,
         origin_policy: OriginPolicy,
@@ -71,7 +71,7 @@ impl McpServer {
     ) -> Self {
         Self {
             tools,
-            invoker,
+            component_host,
             publisher,
             addr,
             origin_policy,
@@ -224,11 +224,11 @@ impl McpServer {
                         Err(e) => return CallToolResult::error(vec![Content::text(e)]),
                     };
                     let wit_result = match self
-                        .invoker
+                        .component_host
                         .invoke(
                             component_name,
                             invocation.function_key.as_str(),
-                            invocation.args,
+                            invocation.args.into_iter().map(Val::Json).collect(),
                             None,
                         )
                         .await
@@ -237,6 +237,16 @@ impl McpServer {
                         Err(e) => {
                             return CallToolResult::error(vec![Content::text(e.to_string())]);
                         }
+                    };
+                    // The reply mapper is JSON-based.
+                    let wit_result = match wit_result {
+                        Some(value) => match value.into_json() {
+                            Ok(json) => json,
+                            Err(e) => {
+                                return CallToolResult::error(vec![Content::text(e.to_string())]);
+                            }
+                        },
+                        None => serde_json::Value::Null,
                     };
                     // Propagation entries (PROPAGATED_HEADERS) read from the
                     // inbound Message carry into the reply Message.
@@ -1037,7 +1047,7 @@ mod tests {
 
     // Build an McpServer from a Runtime by auto-discovering all components.
     fn build_test_server(runtime: &Runtime) -> McpServer {
-        let invoker = runtime.invoker();
+        let component_host = runtime.host();
         let mut tools = HashMap::new();
 
         for component in runtime.list_components(None) {
@@ -1073,7 +1083,7 @@ mod tests {
         let dummy_addr = "127.0.0.1:0".parse().unwrap();
         McpServer::new(
             tools,
-            invoker,
+            component_host,
             None,
             dummy_addr,
             OriginPolicy::AllowAll,

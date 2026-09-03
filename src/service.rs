@@ -4,9 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use composable_runtime::{
-    ComponentInvoker, ConfigHandler, MessageMapper, MessagePublisher, Service,
-};
+use composable_runtime::{ComponentHost, ConfigHandler, MessageMapper, MessagePublisher, Service};
 use rmcp::model::Tool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -20,8 +18,8 @@ use crate::server::McpServer;
 
 pub struct McpService {
     config: SharedConfig,
-    invoker: Mutex<Option<Arc<dyn ComponentInvoker>>>,
-    publisher: Mutex<Option<Arc<dyn MessagePublisher>>>,
+    component_host: Mutex<Option<Arc<dyn ComponentHost>>>,
+    message_publisher: Mutex<Option<Arc<dyn MessagePublisher>>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -32,8 +30,8 @@ impl Default for McpService {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             config: config::shared_config(),
-            invoker: Mutex::new(None),
-            publisher: Mutex::new(None),
+            component_host: Mutex::new(None),
+            message_publisher: Mutex::new(None),
             shutdown_tx,
             shutdown_rx,
             tasks: Mutex::new(Vec::new()),
@@ -71,13 +69,13 @@ pub struct ResolvedTool {
 // Resolve all tools for a server from both explicit tool configs and component-selector.
 fn resolve_tools(
     server_config: &McpServerConfig,
-    invoker: &dyn ComponentInvoker,
+    component_host: &dyn ComponentHost,
 ) -> Result<HashMap<String, ResolvedTool>> {
     let mut tools = HashMap::new();
 
     // Selector-discovered tools first (explicit tools take precedence on collision)
     if let Some(selector) = &server_config.component_selector {
-        let components = invoker.list_components(Some(selector));
+        let components = component_host.list_components(Some(selector));
         for component in components {
             for function in component.functions.values() {
                 let tool_name = format!("{}.{}", component.metadata.name, function.key());
@@ -128,7 +126,7 @@ fn resolve_tools(
                 input_schema,
                 output_schema,
             } => {
-                let comp = invoker.get_component(component).ok_or_else(|| {
+                let comp = component_host.get_component(component).ok_or_else(|| {
                     anyhow::anyhow!(
                         "Server '{}': tool '{}' references unknown component '{}'",
                         server_config.name,
@@ -342,12 +340,12 @@ impl Service for McpService {
         ))))
     }
 
-    fn set_invoker(&self, invoker: Arc<dyn ComponentInvoker>) {
-        *self.invoker.lock().unwrap() = Some(invoker);
+    fn set_component_host(&self, component_host: Arc<dyn ComponentHost>) {
+        *self.component_host.lock().unwrap() = Some(component_host);
     }
 
-    fn set_publisher(&self, publisher: Arc<dyn MessagePublisher>) {
-        *self.publisher.lock().unwrap() = Some(publisher);
+    fn set_message_publisher(&self, message_publisher: Arc<dyn MessagePublisher>) {
+        *self.message_publisher.lock().unwrap() = Some(message_publisher);
     }
 
     fn start(&self) -> Result<()> {
@@ -356,14 +354,14 @@ impl Service for McpService {
             std::mem::take(&mut *config)
         };
 
-        let invoker = self
-            .invoker
+        let component_host = self
+            .component_host
             .lock()
             .unwrap()
             .clone()
-            .expect("set_invoker must be called before start");
+            .expect("set_component_host must be called before start");
 
-        let publisher = self.publisher.lock().unwrap().clone();
+        let message_publisher = self.message_publisher.lock().unwrap().clone();
 
         if server_configs.is_empty() {
             tracing::info!(
@@ -376,7 +374,7 @@ impl Service for McpService {
         let mut handles = Vec::new();
 
         for server_config in server_configs {
-            let tools = resolve_tools(&server_config, &*invoker)?;
+            let tools = resolve_tools(&server_config, &*component_host)?;
 
             let tool_count = tools.len();
             let origin_policy = OriginPolicy::from_config(
@@ -409,8 +407,8 @@ impl Service for McpService {
 
             let server = McpServer::new(
                 tools,
-                Arc::clone(&invoker),
-                publisher.clone(),
+                Arc::clone(&component_host),
+                message_publisher.clone(),
                 addr,
                 origin_policy,
                 tracer_provider,
