@@ -1,0 +1,49 @@
+interface deserializer {
+    resource deserializer {
+        // Parse the input JSON (an object keyed by param name).
+        constructor(input: string);
+
+        // Descend into object field `name`. False if absent.
+        enter-field: func(name: string) -> bool;
+
+        // The number of items in the collection at the cursor.
+        length: func() -> u32;
+
+        // Descend into element `index` of the array, or into the value of the
+        // object's `index`th entry. False if out of range.
+        enter-element: func(index: u32) -> bool;
+
+        // The key of the object's `index`th entry, for a map whose keys the
+        // caller must supply one at a time. Empty if out of range.
+        key-at: func(index: u32) -> string;
+
+        // Index of the active case within `names`, or none if it's not listed.
+        case-index: func(names: list<string>) -> option<u32>;
+
+        // Descend into the active case's payload. False for a unit case.
+        enter-payload: func() -> bool;
+
+        // The flags set as bits at the positions corresponding to their names.
+        flag-bits: func(names: list<string>) -> result<u32, string>;
+
+        // Ascend to the parent. Exactly one per successful `enter-*`.
+        exit: func();
+
+        // Pull the value at the current cursor as a primitive leaf.
+        // Width-specific getters return values matching the target param's
+        // WIT width.
+        get-string: func() -> string;
+        get-char: func() -> char;
+        get-bool: func() -> bool;
+        get-s8: func() -> s8;
+        get-s16: func() -> s16;
+        get-s32: func() -> s32;
+        get-s64: func() -> s64;
+        get-u8: func() -> u8;
+        get-u16: func() -> u16;
+        get-u32: func() -> u32;
+        get-u64: func() -> u64;
+        get-f32: func() -> f32;
+        get-f64: func() -> f64;
+    }
+}

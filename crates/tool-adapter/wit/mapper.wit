@@ -1,0 +1,100 @@
+package composable:factory@0.1.0;
+
+interface deserializer {
+    resource deserializer {
+        // Parse the input JSON (an object keyed by param name).
+        constructor(input: string);
+
+        // Descend into object field `name`. False if absent.
+        enter-field: func(name: string) -> bool;
+
+        // The number of items in the collection at the cursor.
+        length: func() -> u32;
+
+        // Descend into element `index` of the array, or into the value of the
+        // object's `index`th entry. False if out of range.
+        enter-element: func(index: u32) -> bool;
+
+        // The key of the object's `index`th entry, for a map whose keys the
+        // caller must supply one at a time. Empty if out of range.
+        key-at: func(index: u32) -> string;
+
+        // Index of the active case within `names`, or none if it's not listed.
+        case-index: func(names: list<string>) -> option<u32>;
+
+        // Descend into the active case's payload. False for a unit case.
+        enter-payload: func() -> bool;
+
+        // The flags set at the cursor, as bits at the positions corresponding
+        // to their `names`. Matching the names here keeps that comparison out
+        // of the emitted wasm (like `case-index` and `key-at` do). The error
+        // names a set flag that is not declared, and so has no bit to set.
+        flag-bits: func(names: list<string>) -> result<u32, string>;
+
+        // Ascend to the parent. Exactly one per successful `enter-*`.
+        exit: func();
+
+        // Pull the value at the current cursor as a primitive leaf.
+        // Width-specific getters return values matching the target param's
+        // WIT width.
+        get-string: func() -> string;
+        get-char: func() -> char;
+        get-bool: func() -> bool;
+        get-s8: func() -> s8;
+        get-s16: func() -> s16;
+        get-s32: func() -> s32;
+        get-s64: func() -> s64;
+        get-u8: func() -> u8;
+        get-u16: func() -> u16;
+        get-u32: func() -> u32;
+        get-u64: func() -> u64;
+        get-f32: func() -> f32;
+        get-f64: func() -> f64;
+    }
+}
+
+interface serializer {
+    resource serializer {
+        constructor();
+
+        add-bool: func(b: bool);
+        add-s8: func(n: s8);
+        add-s16: func(n: s16);
+        add-s32: func(n: s32);
+        add-s64: func(n: s64);
+        add-u8: func(n: u8);
+        add-u16: func(n: u16);
+        add-u32: func(n: u32);
+        add-u64: func(n: u64);
+        add-f32: func(n: f32);
+        add-f64: func(n: f64);
+        add-char: func(c: char);
+        add-string: func(s: string);
+        add-null: func();
+
+        begin-object: func();
+        add-key: func(name: string); // the next add-* is this key's value
+        end-object: func();
+        begin-array: func();
+        end-array: func();
+
+        // An enum's case name, which is the whole value.
+        add-enum: func(%case: string);
+
+        // A variant, option, or result case with no payload, whose siblings
+        // might have one. The caller emits one branch per case and calls this
+        // inside the branch.
+        add-case: func(%case: string);
+
+        // The bracket around a case's payload, whose add-* calls follow.
+        begin-case: func(%case: string);
+        end-case: func();
+
+        begin-flags: func();
+        add-flag: func(name: string);
+        end-flags: func();
+
+        // Consume the serializer and return the accumulated JSON string.
+        finish: func() -> string;
+    }
+}

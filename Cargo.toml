@@ -3,6 +3,10 @@ name = "composable-mcp"
 version = "0.5.0-alpha.4"
 edition = "2024"
 
+[workspace]
+members = [".", "crates/tool-adapter"]
+resolver = "3"
+
 [[bin]]
 name = "toolbelt"
 path = "src/main.rs"

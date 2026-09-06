@@ -1,0 +1,58 @@
+package composable:tools@0.1.0;
+
+/// Shared types for tool components.
+interface types {
+    /// Optional annotations describing expected tool behavior. Mirroring the
+    /// MCP ToolAnnotations, these are hints, not guarantees.
+    record tool-annotations {
+        /// Human-readable display name.
+        title: option<string>,
+        /// If true, the tool should not modify its environment.
+        read-only-hint: option<bool>,
+        /// If true, the tool may perform destructive updates.
+        destructive-hint: option<bool>,
+        /// If true, repeated calls with the same arguments should have no
+        /// additional effect.
+        idempotent-hint: option<bool>,
+        /// If true, the tool may interact with external entities.
+        open-world-hint: option<bool>,
+    }
+
+    /// Describes a tool for discovery and for presenting to a language model.
+    record tool-metadata {
+        name: string,
+        title: option<string>,
+        description: option<string>,
+        /// JSON Schema for the tool's input arguments.
+        input-schema: string,
+        /// Optional JSON Schema for structured output.
+        output-schema: option<string>,
+        annotations: option<tool-annotations>,
+    }
+}
+
+/// The universal tool interface exported by any tool implementation.
+interface tool {
+    use types.{tool-metadata};
+
+    /// Return this tool's metadata.
+    metadata: async func() -> result<tool-metadata, string>;
+
+    /// Invoke the tool. `input` is a JSON string (the arguments object);
+    /// the Ok result is a JSON string (as an MCP CallToolResult).
+    /// The Err arm carries a transport or dispatch failure message.
+    call: async func(input: string) -> result<string, string>;
+}
+
+/// A named collection of tools.
+interface toolset {
+    use types.{tool-metadata};
+
+    /// List the metadata for every tool in this toolset.
+    %list: async func() -> result<list<tool-metadata>, string>;
+
+    /// Invoke a tool by name. `input` is a JSON string (the arguments object);
+    /// the Ok result is a JSON string (as an MCP CallToolResult).
+    /// The Err arm carries a transport or dispatch failure message.
+    call: async func(name: string, input: string) -> result<string, string>;
+}

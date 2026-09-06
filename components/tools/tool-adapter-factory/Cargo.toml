@@ -1,0 +1,14 @@
+[package]
+name = "tool-adapter-factory"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+composable-factory = { git = "https://github.com/modulewise/composable-factory", branch = "main" }
+tool-adapter = { path = "../../../crates/tool-adapter" }
+wit-bindgen = { version = "0.61", features = ["async-spawn"] }
+
+[workspace]
