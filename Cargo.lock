@@ -514,6 +514,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "composable-factory"
+version = "0.1.0"
+source = "git+https://github.com/modulewise/composable-factory?branch=main#4c8c9fb2c69cdbe767ad5495cc4a3051a750b17e"
+dependencies = [
+ "anyhow",
+ "indexmap 2.14.1",
+ "serde_json",
+ "wasm-encoder 0.258.0",
+ "wasmparser 0.258.0",
+ "wit-component 0.258.0",
+ "wit-parser 0.258.0",
+]
+
+[[package]]
 name = "composable-interceptor"
 version = "0.5.0-alpha.5"
 source = "git+https://github.com/modulewise/composable-runtime?branch=main#0c40fa43c64d6d087ee5f378aa16338a6d78e24f"
@@ -3936,6 +3950,16 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
+]
+
+[[package]]
+name = "tool-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "composable-factory",
+ "wasm-encoder 0.258.0",
+ "wit-parser 0.258.0",
 ]
 
 [[package]]

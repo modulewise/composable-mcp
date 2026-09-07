@@ -1,0 +1,9 @@
+[component.greeter-tool]
+uri = "./lib/greeter-tool.wasm"
+imports = ["greeter", "mapper"]
+
+[component.greeter]
+uri = "./lib/greeter.wasm"
+
+[component.mapper]
+uri = "./lib/json-mapper.wasm"

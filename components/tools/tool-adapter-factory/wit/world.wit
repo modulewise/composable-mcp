@@ -1,0 +1,8 @@
+package composable-mcp:tool-adapter-factory@0.1.0;
+
+world tool-adapter-factory {
+    import wasi:config/store@0.2.0-rc.1;
+    import composable:factory/loader@0.1.0;
+
+    export composable:factory/factory@0.1.0;
+}

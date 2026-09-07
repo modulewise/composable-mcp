@@ -1,0 +1,2 @@
+[overrides]
+"composable:factory" = { path = "./wit/overrides/composable-factory" }
