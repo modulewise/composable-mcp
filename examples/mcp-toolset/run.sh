@@ -12,7 +12,7 @@ fi
 
 # The mcp-toolset exposes an MCP server (localhost:3001/mcp) as one toolset.
 # `list` returns metadata for every tool and `call` dispatches by tool name.
-NAME="${1:-calculator.multiply}"
+NAME="${1:-multiply}"
 DEFAULT_ARGS='{"a":6,"b":7}'
 ARGS="${2:-$DEFAULT_ARGS}"
 
@@ -21,8 +21,5 @@ composable invoke config.toml -- mcp-toolset.toolset.list
 
 echo
 echo "Invoking toolset.call: ${NAME} ${ARGS}"
-if command -v jq &>/dev/null; then
-  composable invoke config.toml -- mcp-toolset.toolset.call "$NAME" "$ARGS" | jq 'fromjson'
-else
-  composable invoke config.toml -- mcp-toolset.toolset.call "$NAME" "$ARGS"
-fi
+REQUEST=$(printf '{"name":"%s","arguments":%s,"meta":[]}' "$NAME" "$(printf '%s' "$ARGS" | jq -Rs .)")
+composable invoke config.toml -- mcp-toolset.toolset.call "$REQUEST" | jq .

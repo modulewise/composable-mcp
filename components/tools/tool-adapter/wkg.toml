@@ -1,0 +1,3 @@
+[overrides]
+"composable:runtime" = { path = "./wit/overrides/composable-runtime" }
+"composable:tools" = { path = "../wit" }

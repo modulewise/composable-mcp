@@ -1,3 +1,0 @@
-interface factory {
-    build: async func() -> result<list<u8>, string>;
-}

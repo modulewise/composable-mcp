@@ -1,0 +1,11 @@
+package composable-mcp:tool-adapter@0.1.0;
+
+/// Presents any `composable:runtime/function` as a tool.
+/// The function supplies the name, description, and schemas. The config adds
+/// title, annotations, and optional overrides for name/description.
+world tool-adapter {
+    import wasi:config/store@0.2.0-rc.1;
+    import composable:runtime/function@0.1.0;
+
+    export composable:tools/tool@0.2.0;
+}

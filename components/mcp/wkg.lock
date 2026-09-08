@@ -7,9 +7,9 @@ name = "composable:http"
 registry = "modulewise"
 
 [[packages.versions]]
-requirement = "=0.2.0"
-version = "0.2.0"
-digest = "sha256:afaa68255e940f7eadce05055dd706efc7c90adfdb22884708e8d580174be241"
+requirement = "=0.4.0"
+version = "0.4.0"
+digest = "sha256:8d9218b0e80ee4eb80e5d7d91d34ee9eaa9ccfc0487aa40974990213782c1f28"
 
 [[packages]]
 name = "wasi:clocks"

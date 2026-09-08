@@ -91,8 +91,8 @@ impl exports::composable::mcp::client::GuestSession for Session {
             if let Some(ref cursor) = req.cursor {
                 params["cursor"] = json!(cursor);
             }
-            if let Some(ref meta) = req.meta {
-                params["_meta"] = meta_to_json(meta);
+            if !req.meta.is_empty() {
+                params["_meta"] = meta_to_json(&req.meta);
             }
         }
 
@@ -158,7 +158,7 @@ impl exports::composable::mcp::client::GuestSession for Session {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let meta = parse_meta(result.get("_meta"));
+        let meta = meta_entries(result.get("_meta"));
 
         Ok(ListToolsResponse {
             id,
@@ -179,13 +179,11 @@ impl exports::composable::mcp::client::GuestSession for Session {
         log_debug(&format!("Tool arguments: {:?}", request.arguments));
 
         let mut params = json!({ "name": request.name });
-        if let Some(ref args_str) = request.arguments {
-            let args: serde_json::Value =
-                serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-            params["arguments"] = args;
-        }
-        if let Some(ref meta) = request.meta {
-            params["_meta"] = meta_to_json(meta);
+        let args: serde_json::Value =
+            serde_json::from_str(&request.arguments).unwrap_or(serde_json::json!({}));
+        params["arguments"] = args;
+        if !request.meta.is_empty() {
+            params["_meta"] = meta_to_json(&request.meta);
         }
 
         let request_body = json!({
@@ -306,10 +304,10 @@ async fn post(
     let response = client::post(url.to_string(), headers, body_rx, None)
         .await
         .map_err(|e| {
-            log_error(&format!("HTTP request failed: {}", e));
-            e
+            let message = http_error(e);
+            log_error(&format!("HTTP request failed: {}", message));
+            message
         })?;
-
     log_debug(&format!("HTTP response status: {}", response.status));
 
     Ok(response)
@@ -328,7 +326,7 @@ impl Default for InitializeRequest {
             protocol_version: None,
             capabilities: None,
             client_info: None,
-            meta: None,
+            meta: Vec::new(),
         }
     }
 }
@@ -373,10 +371,9 @@ async fn initialize_session(
         "capabilities": capabilities,
         "clientInfo": client_info_json
     });
-    if let Some(ref meta) = request.meta {
-        params["_meta"] = meta_to_json(meta);
+    if !request.meta.is_empty() {
+        params["_meta"] = meta_to_json(&request.meta);
     }
-
     let request_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -468,7 +465,7 @@ async fn initialize_session(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let meta = parse_meta(result.get("_meta"));
+    let meta = meta_entries(result.get("_meta"));
 
     // Send initialized notification.
     let notification_body = json!({
@@ -646,8 +643,8 @@ fn parse_sse_response(body: &str) -> Result<serde_json::Value, String> {
 }
 
 // Parse MCP Tool JSON into WIT Tool structure.
-fn parse_tool(tool_json: &serde_json::Value) -> Result<Tool, String> {
-    Ok(Tool {
+fn parse_tool(tool_json: &serde_json::Value) -> Result<ToolMetadata, String> {
+    Ok(ToolMetadata {
         name: tool_json["name"]
             .as_str()
             .ok_or("Missing tool name")?
@@ -657,7 +654,7 @@ fn parse_tool(tool_json: &serde_json::Value) -> Result<Tool, String> {
         input_schema: tool_json["inputSchema"].to_string(),
         output_schema: tool_json.get("outputSchema").map(|s| s.to_string()),
         annotations: parse_tool_annotations(tool_json.get("annotations")),
-        meta: parse_meta(tool_json.get("_meta")),
+        meta: meta_entries(tool_json.get("_meta")),
     })
 }
 
@@ -716,7 +713,7 @@ fn parse_call_tool_result(result: &serde_json::Value) -> Result<CallToolResult, 
         content,
         is_error: result["isError"].as_bool().unwrap_or(false),
         structured_content,
-        meta: parse_meta(result.get("_meta")),
+        meta: meta_entries(result.get("_meta")),
     })
 }
 
@@ -726,7 +723,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
         "text" => Ok(ContentBlock::Text(TextContent {
             text: item["text"].as_str().ok_or("Missing text")?.to_string(),
             annotations: parse_annotations(item.get("annotations")),
-            meta: parse_meta(item.get("_meta")),
+            meta: meta_entries(item.get("_meta")),
         })),
         "image" => Ok(ContentBlock::Image(ImageContent {
             data: item["data"]
@@ -738,7 +735,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
                 .ok_or("Missing mime type")?
                 .to_string(),
             annotations: parse_annotations(item.get("annotations")),
-            meta: parse_meta(item.get("_meta")),
+            meta: meta_entries(item.get("_meta")),
         })),
         "audio" => Ok(ContentBlock::Audio(AudioContent {
             data: item["data"]
@@ -750,7 +747,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
                 .ok_or("Missing mime type")?
                 .to_string(),
             annotations: parse_annotations(item.get("annotations")),
-            meta: parse_meta(item.get("_meta")),
+            meta: meta_entries(item.get("_meta")),
         })),
         "resource_link" => Ok(ContentBlock::ResourceLink(ResourceLink {
             uri: item["uri"].as_str().ok_or("Missing URI")?.to_string(),
@@ -767,7 +764,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             annotations: parse_annotations(item.get("annotations")),
-            meta: parse_meta(item.get("_meta")),
+            meta: meta_entries(item.get("_meta")),
         })),
         "resource" => {
             let resource = item["resource"]
@@ -782,7 +779,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     text: text.as_str().ok_or("Missing text")?.to_string(),
-                    meta: parse_meta(resource_value.get("_meta")),
+                    meta: meta_entries(resource_value.get("_meta")),
                 })
             } else if let Some(blob) = resource.get("blob") {
                 ResourceContents::Blob(BlobResourceContents {
@@ -792,7 +789,7 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     blob: blob.as_str().ok_or("Missing blob")?.to_string(),
-                    meta: parse_meta(resource_value.get("_meta")),
+                    meta: meta_entries(resource_value.get("_meta")),
                 })
             } else {
                 return Err("Resource must have text or blob".to_string());
@@ -801,10 +798,18 @@ fn parse_content_item(item: &serde_json::Value) -> Result<ContentBlock, String> 
             Ok(ContentBlock::Resource(EmbeddedResource {
                 resource_data: resource_contents,
                 annotations: parse_annotations(item.get("annotations")),
-                meta: parse_meta(item.get("_meta")),
+                meta: meta_entries(item.get("_meta")),
             }))
         }
         t => Err(format!("Unknown content type: {t}")),
+    }
+}
+
+// An http-client error as a message.
+fn http_error(error: composable::http::client::ErrorCode) -> String {
+    match error {
+        composable::http::client::ErrorCode::Other(Some(detail)) => detail,
+        composable::http::client::ErrorCode::Other(None) => "unknown error".to_string(),
     }
 }
 
@@ -818,19 +823,19 @@ fn meta_to_json(meta: &[(String, String)]) -> serde_json::Value {
 
 // Parse the spec's `_meta` JSON object into the WIT meta-entry list.
 // String values are passed through. Other JSON values are serialized.
-fn parse_meta(value: Option<&serde_json::Value>) -> Option<Vec<(String, String)>> {
-    let obj = value?.as_object()?;
-    Some(
-        obj.iter()
-            .map(|(k, v)| {
-                let s = v
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| v.to_string());
-                (k.clone(), s)
-            })
-            .collect(),
-    )
+fn meta_entries(value: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let Some(obj) = value.and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    obj.iter()
+        .map(|(k, v)| {
+            let s = v
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string());
+            (k.clone(), s)
+        })
+        .collect()
 }
 
 fn log_debug(message: &str) {

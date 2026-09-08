@@ -1,0 +1,16 @@
+package composable:runtime@0.1.0;
+
+interface function {
+    type json = string;
+
+    record function-metadata {
+        name: string,
+        description: option<string>,
+        input-schema: json,
+        output-schema: json,
+    }
+
+    metadata: async func() -> result<function-metadata, string>;
+
+    call: async func(input: json) -> result<json, json>;
+}

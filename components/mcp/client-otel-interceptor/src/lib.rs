@@ -44,11 +44,9 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
                     protocol_version: None,
                     capabilities: None,
                     client_info: None,
-                    meta: None,
+                    meta: Vec::new(),
                 });
-                let mut meta = req.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                req.meta = Some(meta);
+                inject_trace_context(&mut req.meta, traceparent, tracestate);
                 let server_url = server_url.clone();
                 async move { TargetSession::initialize(server_url, Some(req)).await }
             },
@@ -112,11 +110,9 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
             |traceparent, tracestate| {
                 let mut req = request.unwrap_or(ListToolsRequest {
                     cursor: None,
-                    meta: None,
+                    meta: Vec::new(),
                 });
-                let mut meta = req.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                req.meta = Some(meta);
+                inject_trace_context(&mut req.meta, traceparent, tracestate);
                 async move { self.target.list_tools(Some(req)).await }
             },
             |result, attrs| match result {
@@ -162,9 +158,7 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
             initial_attributes,
             |traceparent, tracestate| {
                 let mut req = request;
-                let mut meta = req.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                req.meta = Some(meta);
+                inject_trace_context(&mut req.meta, traceparent, tracestate);
                 async move { self.target.call_tool(req).await }
             },
             |result, attrs| match result {

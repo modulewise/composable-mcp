@@ -1,0 +1,75 @@
+package composable:http@0.4.0;
+
+interface client {
+  enum method {
+    get,
+    post,
+    put,
+    delete,
+    patch,
+    head,
+    options,
+    trace,
+    query,
+  }
+
+  variant error-code {
+    other(option<string>),
+  }
+
+  /// Per-request options. None fields fall through to host defaults.
+  record request-options {
+    connect-timeout-ms: option<u32>,
+    first-byte-timeout-ms: option<u32>,
+    between-bytes-timeout-ms: option<u32>,
+  }
+
+  /// A streaming HTTP response. The status and headers are available
+  /// immediately; the body streams as `body`, and trailers (if any) resolve
+  /// via `trailers` once the body stream is fully consumed.
+  record http-response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: stream<u8>,
+    trailers: future<result<list<tuple<string, string>>, error-code>>,
+  }
+
+  /// Send an HTTP request with an explicit method. Both the request body and
+  /// the response body stream.
+  request: async func(method: method, url: string, headers: list<tuple<string, string>>, body: option<stream<u8>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP GET request.
+  get: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP POST request.
+  post: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP PUT request.
+  put: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP DELETE request.
+  delete: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP PATCH request.
+  patch: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP HEAD request.
+  head: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP OPTIONS request.
+  options: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP TRACE request.
+  trace: async func(url: string, headers: list<tuple<string, string>>, options: option<request-options>) -> result<http-response, error-code>;
+
+  /// HTTP QUERY request.
+  query: async func(url: string, headers: list<tuple<string, string>>, body: stream<u8>, options: option<request-options>) -> result<http-response, error-code>;
+}
+
+world http-client {
+  import wasi:clocks/types@0.3.0;
+  import wasi:http/types@0.3.0;
+  import wasi:http/client@0.3.0;
+
+  export client;
+}
