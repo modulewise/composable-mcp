@@ -1,0 +1,14 @@
+[package]
+name = "tool-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+function-invoker = { git = "https://github.com/modulewise/composable-runtime", branch = "main" }
+serde_json = { version = "1", default-features = false, features = ["alloc", "preserve_order"] }
+wit-bindgen = { version = "0.61", features = ["async-spawn"] }
+
+[workspace]

@@ -2,7 +2,7 @@
 uri = "../../components/lib/mcp-tool.wasm"
 imports = ["mcp-client"]
 config.server-url = "http://localhost:3001/mcp"
-config.tool-name = "calculator.multiply"
+config.tool-name = "multiply"
 
 [component.mcp-client]
 uri = "../../components/lib/mcp-client-otel-interceptor.wasm"

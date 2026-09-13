@@ -15,20 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "composable-factory"
-version = "0.1.0"
-source = "git+https://github.com/modulewise/composable-factory?branch=main#4c8c9fb2c69cdbe767ad5495cc4a3051a750b17e"
-dependencies = [
- "anyhow",
- "indexmap",
- "serde_json",
- "wasm-encoder",
- "wasmparser",
- "wit-component",
- "wit-parser",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -39,6 +25,14 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "function-invoker"
+version = "0.1.0"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#01512286b618b0f9befd4465c9ddf803b8d61e16"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "futures"
@@ -108,8 +102,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -246,6 +238,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -285,18 +278,8 @@ dependencies = [
 name = "tool-adapter"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "composable-factory",
- "wasm-encoder",
- "wit-parser",
-]
-
-[[package]]
-name = "tool-adapter-factory"
-version = "0.1.0"
-dependencies = [
- "composable-factory",
- "tool-adapter",
+ "function-invoker",
+ "serde_json",
  "wit-bindgen",
 ]
 
@@ -338,7 +321,6 @@ dependencies = [
  "hashbrown",
  "indexmap",
  "semver",
- "serde",
 ]
 
 [[package]]

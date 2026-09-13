@@ -10,15 +10,9 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use serde_json::json;
-
 use composable::mcp::client::Session;
-use composable::mcp::types::{
-    AudioContent, CallToolPayload, CallToolRequest, CallToolResult, ContentBlock, EmbeddedResource,
-    ImageContent, ListToolsPayload, ResourceContents, ResourceLink, TextContent, Tool,
-    ToolAnnotations as McpToolAnnotations,
-};
-use composable::tools::types::{ToolAnnotations, ToolMetadata};
+use composable::mcp::types::{CallToolPayload, ListToolsPayload};
+use composable::tools::types::{CallToolRequest, CallToolResult, ToolError, ToolMetadata};
 
 struct McpToolset;
 
@@ -32,35 +26,27 @@ impl exports::composable::tools::toolset::Guest for McpToolset {
         session.close().await;
 
         match response?.payload {
-            ListToolsPayload::Result(result) => {
-                Ok(result.tools.iter().map(tool_to_metadata).collect())
-            }
+            ListToolsPayload::Result(result) => Ok(result.tools),
             ListToolsPayload::Error(e) => {
                 Err(format!("MCP protocol error {}: {}", e.code, e.message))
             }
         }
     }
 
-    async fn call(name: String, input: String) -> Result<String, String> {
-        let server_url = config_get("server-url")
-            .ok_or_else(|| "missing required config: server-url".to_string())?;
-
-        let session = Session::initialize(server_url, None).await?;
-
-        let request = CallToolRequest {
-            name,
-            arguments: Some(input),
-            meta: None,
-        };
+    async fn call(request: CallToolRequest) -> Result<CallToolResult, ToolError> {
+        let session = Session::initialize(required_config("server-url")?, None)
+            .await
+            .map_err(transport_error)?;
         let response = session.call_tool(request).await;
         session.close().await;
 
-        let response = response?;
-        match response.payload {
-            CallToolPayload::Result(result) => Ok(call_tool_result_to_json(&result).to_string()),
-            CallToolPayload::Error(e) => {
-                Err(format!("MCP protocol error {}: {}", e.code, e.message))
-            }
+        match response.map_err(transport_error)?.payload {
+            CallToolPayload::Result(result) => Ok(result),
+            CallToolPayload::Error(e) => Err(ToolError {
+                code: e.code,
+                message: e.message,
+                data: e.data,
+            }),
         }
     }
 }
@@ -70,98 +56,21 @@ fn config_get(key: &str) -> Option<String> {
     wasi::config::store::get(key).ok().flatten()
 }
 
-// Map an MCP tools/list entry to composable:tools tool-metadata.
-fn tool_to_metadata(tool: &Tool) -> ToolMetadata {
-    ToolMetadata {
-        name: tool.name.clone(),
-        title: tool.title.clone(),
-        description: tool.description.clone(),
-        input_schema: tool.input_schema.clone(),
-        output_schema: tool.output_schema.clone(),
-        annotations: tool.annotations.as_ref().map(annotations_to_tools),
-    }
+// A required configuration value, as a `tool-error` when unset.
+fn required_config(key: &str) -> Result<String, ToolError> {
+    config_get(key).ok_or_else(|| ToolError {
+        code: -32000,
+        message: format!("missing required config: {key}"),
+        data: None,
+    })
 }
 
-fn annotations_to_tools(a: &McpToolAnnotations) -> ToolAnnotations {
-    ToolAnnotations {
-        title: a.title.clone(),
-        read_only_hint: a.read_only_hint,
-        destructive_hint: a.destructive_hint,
-        idempotent_hint: a.idempotent_hint,
-        open_world_hint: a.open_world_hint,
-    }
-}
-
-// Serialize a WIT call-tool-result back to an MCP CallToolResult JSON object.
-// The `structuredContent` is included when the remote server provides it.
-fn call_tool_result_to_json(result: &CallToolResult) -> serde_json::Value {
-    let content: Vec<serde_json::Value> =
-        result.content.iter().map(content_block_to_json).collect();
-
-    let mut obj = json!({
-        "content": content,
-        "isError": result.is_error,
-    });
-
-    if let Some(structured) = &result.structured_content {
-        let value: serde_json::Value =
-            serde_json::from_str(structured).unwrap_or(serde_json::Value::Null);
-        obj["structuredContent"] = value;
-    }
-
-    obj
-}
-
-fn content_block_to_json(block: &ContentBlock) -> serde_json::Value {
-    match block {
-        ContentBlock::Text(TextContent { text, .. }) => json!({ "type": "text", "text": text }),
-        ContentBlock::Image(ImageContent {
-            data, mime_type, ..
-        }) => json!({ "type": "image", "data": data, "mimeType": mime_type }),
-        ContentBlock::Audio(AudioContent {
-            data, mime_type, ..
-        }) => json!({ "type": "audio", "data": data, "mimeType": mime_type }),
-        ContentBlock::ResourceLink(ResourceLink {
-            uri,
-            name,
-            description,
-            mime_type,
-            ..
-        }) => {
-            let mut obj = json!({ "type": "resource_link", "uri": uri });
-            if let Some(name) = name {
-                obj["name"] = json!(name);
-            }
-            if let Some(description) = description {
-                obj["description"] = json!(description);
-            }
-            if let Some(mime_type) = mime_type {
-                obj["mimeType"] = json!(mime_type);
-            }
-            obj
-        }
-        ContentBlock::Resource(EmbeddedResource { resource_data, .. }) => {
-            json!({ "type": "resource", "resource": resource_contents_to_json(resource_data) })
-        }
-    }
-}
-
-fn resource_contents_to_json(contents: &ResourceContents) -> serde_json::Value {
-    match contents {
-        ResourceContents::Text(t) => {
-            let mut obj = json!({ "uri": t.uri, "text": t.text });
-            if let Some(mime_type) = &t.mime_type {
-                obj["mimeType"] = json!(mime_type);
-            }
-            obj
-        }
-        ResourceContents::Blob(b) => {
-            let mut obj = json!({ "uri": b.uri, "blob": b.blob });
-            if let Some(mime_type) = &b.mime_type {
-                obj["mimeType"] = json!(mime_type);
-            }
-            obj
-        }
+// A failure to reach the server, as distinct from one the server reported.
+fn transport_error(message: String) -> ToolError {
+    ToolError {
+        code: -32000,
+        message,
+        data: None,
     }
 }
 
