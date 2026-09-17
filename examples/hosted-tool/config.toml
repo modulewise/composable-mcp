@@ -1,0 +1,45 @@
+[server.named]
+type = "mcp"
+port = 3001
+
+[server.named.tool.greet]
+component = "greeter-tool"
+
+[server.selected]
+type = "mcp"
+port = 3002
+component-selector = "labels.mcp=true"
+
+[component.greeter-tool]
+uri = "./lib/tool-adapter.wasm"
+imports = ["greeter-function"]
+labels.mcp = "true"
+config.description = "Greets someone by name"
+config.spec-version = "2026-07-28"
+
+[component.greeter-function]
+uri = "factory:greeter-function-factory"
+imports = ["target", "mapper"]
+
+[component.target]
+uri = "./lib/greeter.wasm"
+
+[component.mapper]
+uri = "./lib/json-mapper.wasm"
+
+[component.greeter-function-factory]
+uri = "./lib/function-factory.wasm"
+imports = ["loader"]
+config.target = "/lib/greeter.wasm"
+
+[component.loader]
+uri = "./lib/filesystem-loader.wasm"
+imports = ["filesystem"]
+
+[capability.filesystem]
+type = "wasi:filesystem"
+
+[[capability.filesystem.preopens]]
+host = "./lib"
+guest = "/lib"
+perms = "read-only"

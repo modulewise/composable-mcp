@@ -1,8 +1,11 @@
 //! Parses `[server.*]` definitions where `type = "mcp"` and the
 //! `[server.mcp.tool.*]` entries nested within.
 //!
-//! A tool target is either:
+//! A tool target is one of:
 //!
+//! - `Tool`: a component exporting `composable:tools/tool`. It reports its
+//!   schemas through `metadata()` so the definition includes only `component`.
+//!   The block name is the MCP tool name.
 //! - `Component`: invokes a WIT function directly. The tool definition
 //!   may carry the four Message <-> WIT mapping blocks (`param-mapping`,
 //!   `param-encoding`, `result-decoding`, `result-mapping`) and an
@@ -37,9 +40,13 @@ use composable_runtime::{
 // Default component selector for auto-discovery: top-level components only.
 const DEFAULT_COMPONENT_SELECTOR: &str = "!dependents";
 
-/// How a tool is backed: direct component invocation or channel publish.
+/// How a tool is backed: a `composable:tools/tool` component, direct
+/// component invocation, or channel publish.
 #[derive(Debug, Clone)]
 pub enum ToolTarget {
+    /// A component exporting `composable:tools/tool`. It describes itself
+    /// through `metadata()`, so no schema or mapping config is accepted.
+    Tool { component: String },
     Component {
         component: String,
         function: String,
@@ -431,10 +438,34 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
                      'component'/'function' and 'channel'"
                 ));
             }
-            (Some(_), None, None) => {
-                return Err(anyhow::anyhow!(
-                    "Server '{server_name}': tool '{tool_name}' has 'component' but missing 'function'"
-                ));
+            (Some(component), None, None) => {
+                // A `tool` component reports its schemas.
+                let mut rejected = Vec::new();
+                if input_schema.is_some() {
+                    rejected.push("input-schema");
+                }
+                if output_schema.is_some() {
+                    rejected.push("output-schema");
+                }
+                if param_mapping.is_some() {
+                    rejected.push("param-mapping");
+                }
+                if param_encoding.is_some() {
+                    rejected.push("param-encoding");
+                }
+                if result_decoding.is_some() {
+                    rejected.push("result-decoding");
+                }
+                if result_mapping.is_some() {
+                    rejected.push("result-mapping");
+                }
+                if !rejected.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' has {rejected:?}, but a \
+                         component exporting 'composable:tools/tool' reports its own schemas"
+                    ));
+                }
+                ToolTarget::Tool { component }
             }
             (None, Some(_), None) => {
                 return Err(anyhow::anyhow!(
@@ -458,6 +489,14 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
             }
             None => None,
         };
+
+        if description.is_some() && matches!(&target, ToolTarget::Tool { .. }) {
+            return Err(anyhow::anyhow!(
+                "Server '{server_name}': tool '{tool_name}' has 'description' but a component \
+                 exporting 'composable:tools/tool' reports its own description through \
+                 'metadata()'"
+            ));
+        }
 
         let propagate_request_meta = parse_propagated_meta_list(
             &mut tool_props,
@@ -794,7 +833,70 @@ mod tests {
     }
 
     #[test]
-    fn component_without_function() {
+    fn component_without_function_is_a_tool_component() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "greet": {
+                        "component": "greeter-tool"
+                    }
+                }),
+            ),
+        ]);
+
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+
+        let servers = config.lock().unwrap();
+        assert!(matches!(
+            &servers[0].tools[0].target,
+            ToolTarget::Tool { component } if component == "greeter-tool"
+        ));
+        assert_eq!(servers[0].tools[0].name, "greet");
+    }
+
+    #[test]
+    fn tool_component_rejects_schema_and_mapping() {
+        for key in [
+            "input-schema",
+            "output-schema",
+            "param-mapping",
+            "param-encoding",
+            "result-decoding",
+            "result-mapping",
+        ] {
+            let (mut handler, _) = make_handler();
+            let properties = props(vec![
+                ("type", serde_json::json!("mcp")),
+                ("port", serde_json::json!(3001)),
+                (
+                    "tool",
+                    serde_json::json!({
+                        "greet": {
+                            "component": "greeter-tool",
+                            key: { "type": "object" }
+                        }
+                    }),
+                ),
+            ]);
+            let err = handler
+                .handle_category("server", "mcp", properties)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(key) && err.contains("reports its own schemas"),
+                "unexpected error for '{key}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_component_rejects_description() {
         let (mut handler, _) = make_handler();
         let properties = props(vec![
             ("type", serde_json::json!("mcp")),
@@ -802,20 +904,46 @@ mod tests {
             (
                 "tool",
                 serde_json::json!({
-                    "bad": {
-                        "component": "math"
+                    "greet": {
+                        "component": "greeter-tool",
+                        "description": "no overrides"
                     }
                 }),
             ),
         ]);
-
-        let result = handler.handle_category("server", "mcp", properties);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = handler
+            .handle_category("server", "mcp", properties)
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("'component' but missing 'function'"),
+            err.contains("reports its own description"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn tool_component_accepts_propagated_meta() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "greet": {
+                        "component": "greeter-tool",
+                        "propagate-request-meta": ["com.example.auth/token"],
+                        "propagate-result-meta": ["x-count as com.example.tools/count"]
+                    }
+                }),
+            ),
+        ]);
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+        let servers = config.lock().unwrap();
+        assert_eq!(servers[0].tools[0].propagate_request_meta.len(), 1);
+        assert_eq!(servers[0].tools[0].propagate_result_meta.len(), 1);
     }
 
     #[test]

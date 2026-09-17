@@ -15,6 +15,7 @@ use crate::config::{self, McpServerConfig, McpServerConfigHandler, SharedConfig,
 use crate::mapper::McpMapper;
 use crate::origin::OriginPolicy;
 use crate::server::McpServer;
+use crate::tools;
 
 pub struct McpService {
     config: SharedConfig,
@@ -42,6 +43,10 @@ impl Default for McpService {
 /// Resolved runtime representation of a tool's target.
 #[derive(Clone)]
 pub enum ResolvedToolTarget {
+    /// A component exporting `composable:tools/tool`.
+    Tool {
+        component_name: String,
+    },
     Component {
         component_name: String,
         mapper: Arc<MessageMapper>,
@@ -67,7 +72,7 @@ pub struct ResolvedTool {
 }
 
 // Resolve all tools for a server from both explicit tool configs and component-selector.
-fn resolve_tools(
+async fn resolve_tools(
     server_config: &McpServerConfig,
     component_host: &dyn ComponentHost,
 ) -> Result<HashMap<String, ResolvedTool>> {
@@ -77,6 +82,20 @@ fn resolve_tools(
     if let Some(selector) = &server_config.component_selector {
         let components = component_host.list_components(Some(selector));
         for component in components {
+            if tools::exports_tool(component) {
+                let tool_name = component.metadata.name.clone();
+                let resolved = resolve_tool_component(
+                    &server_config.name,
+                    &tool_name,
+                    &component.metadata.name,
+                    Vec::new(),
+                    Vec::new(),
+                    component_host,
+                )
+                .await?;
+                tools.insert(tool_name, resolved);
+                continue;
+            }
             for function in component.functions.values() {
                 let tool_name = format!("{}.{}", component.metadata.name, function.key());
                 let tool = McpMapper::function_to_tool(function, &tool_name, None);
@@ -119,6 +138,18 @@ fn resolve_tools(
     // Explicit tool configs override selector-discovered tools on name collision
     for tool_config in &server_config.tools {
         let (name, entry) = match &tool_config.target {
+            ToolTarget::Tool { component } => {
+                let resolved = resolve_tool_component(
+                    &server_config.name,
+                    &tool_config.name,
+                    component,
+                    tool_config.propagate_request_meta.clone(),
+                    tool_config.propagate_result_meta.clone(),
+                    component_host,
+                )
+                .await?;
+                (tool_config.name.clone(), resolved)
+            }
             ToolTarget::Component {
                 component,
                 function,
@@ -322,6 +353,74 @@ fn resolve_tools(
     Ok(tools)
 }
 
+async fn resolve_tool_component(
+    server_name: &str,
+    tool_name: &str,
+    component_name: &str,
+    propagate_request_meta: Vec<composable_runtime::PropagatedHeader>,
+    propagate_result_meta: Vec<composable_runtime::PropagatedHeader>,
+    component_host: &dyn ComponentHost,
+) -> Result<ResolvedTool> {
+    let component = component_host
+        .get_component(component_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Server '{server_name}': tool '{tool_name}' references unknown component \
+             '{component_name}'"
+            )
+        })?;
+    if !tools::exports_tool(component) {
+        return Err(anyhow::anyhow!(
+            "Server '{server_name}': tool '{tool_name}': component '{component_name}' does not \
+             export '{}'. To invoke one of its WIT functions instead, declare a 'function'.",
+            tools::TOOL_EXPORT.trim_end_matches('@'),
+        ));
+    }
+
+    let reported = component_host
+        .invoke(component_name, tools::METADATA_FUNCTION, vec![], None)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Server '{server_name}': tool '{tool_name}': {component_name}: {e}")
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Server '{server_name}': tool '{tool_name}': {component_name}: \
+                 {} returned nothing",
+                tools::METADATA_FUNCTION,
+            )
+        })?;
+    let reported = reported.into_json().map_err(|e| {
+        anyhow::anyhow!("Server '{server_name}': tool '{tool_name}': {component_name}: {e}")
+    })?;
+
+    let tool = tools::tool_from_metadata(&reported, tool_name).map_err(|e| {
+        anyhow::anyhow!("Server '{server_name}': tool '{tool_name}': {component_name}: {e}")
+    })?;
+
+    let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
+    let input_validator = build_validator(server_name, tool_name, "input-schema", &input_schema)?;
+    let output_validator = tool
+        .output_schema
+        .as_ref()
+        .map(|schema| {
+            let schema = serde_json::Value::Object((**schema).clone());
+            build_validator(server_name, tool_name, "output-schema", &schema)
+        })
+        .transpose()?;
+
+    Ok(ResolvedTool {
+        tool,
+        target: ResolvedToolTarget::Tool {
+            component_name: component_name.to_string(),
+        },
+        input_validator,
+        output_validator,
+        propagate_request_meta,
+        propagate_result_meta,
+    })
+}
+
 fn build_validator(
     server_name: &str,
     tool_name: &str,
@@ -371,11 +470,35 @@ impl Service for McpService {
             server_configs.push(config::default_server());
         }
 
+        // Resolving a `tool` component means invoking its async `metadata()`
+        // function. It runs on a thread of its own with its own executor since
+        // sync `start` is itself called from within a runtime.
+        let resolved = {
+            let component_host = Arc::clone(&component_host);
+            let server_configs = server_configs.clone();
+            std::thread::Builder::new()
+                .name("mcp-resolve-tools".to_string())
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?
+                        .block_on(async {
+                            let mut resolved = Vec::new();
+                            for server_config in &server_configs {
+                                resolved
+                                    .push(resolve_tools(server_config, &*component_host).await?);
+                            }
+                            Ok::<_, anyhow::Error>(resolved)
+                        })
+                })
+                .map_err(|e| anyhow::anyhow!("could not start a thread to resolve tools: {e}"))?
+                .join()
+                .map_err(|_| anyhow::anyhow!("resolving tools panicked"))??
+        };
+
         let mut handles = Vec::new();
 
-        for server_config in server_configs {
-            let tools = resolve_tools(&server_config, &*component_host)?;
-
+        for (server_config, tools) in server_configs.into_iter().zip(resolved) {
             let tool_count = tools.len();
             let origin_policy = OriginPolicy::from_config(
                 server_config.allowed_origins.as_deref(),
