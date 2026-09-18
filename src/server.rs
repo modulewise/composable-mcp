@@ -45,6 +45,7 @@ use tokio::sync::watch;
 
 use crate::origin::{OriginPolicy, validate_origin};
 use crate::service::{ResolvedTool, ResolvedToolTarget};
+use crate::tools;
 use composable_runtime::{
     ComponentHost, Message, MessageBuilder, MessageHeaders, MessagePublisher, PROPAGATED_HEADERS,
     PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, Val, schema,
@@ -205,6 +206,14 @@ impl McpServer {
         //   - headers = declared propagate-request-meta entries
         //     (plus the tracing keys merged within MessageBuilder)
         let dispatch = async {
+            // A `tool` component takes the arguments and `_meta` directly and
+            // responds with a result, so no Message or mapping applies.
+            if let ResolvedToolTarget::Tool { component_name } = &resolved.target {
+                return self
+                    .call_tool_component(component_name, resolved, arguments, meta)
+                    .await;
+            }
+
             let message = match build_message_from_mcp_call(
                 arguments,
                 meta,
@@ -215,6 +224,7 @@ impl McpServer {
             };
 
             let reply = match &resolved.target {
+                ResolvedToolTarget::Tool { .. } => unreachable!("handled above"),
                 ResolvedToolTarget::Component {
                     component_name,
                     mapper,
@@ -300,6 +310,158 @@ impl McpServer {
             _ => dispatch.await,
         }
     }
+
+    /// Call a component exporting `composable:tools/tool`.
+    async fn call_tool_component(
+        &self,
+        component_name: &str,
+        resolved: &ResolvedTool,
+        arguments: &JsonObject,
+        meta: Option<&Meta>,
+    ) -> CallToolResult {
+        let arguments = match serde_json::to_string(arguments) {
+            Ok(text) => text,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "failed to serialize MCP arguments: {e}"
+                ))]);
+            }
+        };
+
+        let entries = request_meta_entries(meta, &resolved.propagate_request_meta);
+
+        let returned = self
+            .component_host
+            .invoke(
+                component_name,
+                tools::CALL_FUNCTION,
+                vec![
+                    Val::Json(serde_json::Value::String(arguments)),
+                    Val::Json(tools::meta_entries(entries)),
+                ],
+                None,
+            )
+            .await;
+
+        let returned = match returned {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "{component_name}: {} returned nothing",
+                    tools::CALL_FUNCTION,
+                ))]);
+            }
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "{component_name}: {e}"
+                ))]);
+            }
+        };
+        let returned = match returned.into_json() {
+            Ok(json) => json,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "{component_name}: {e}"
+                ))]);
+            }
+        };
+        let result = match tools::call_tool_result(&returned) {
+            Ok(result) => result,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "{component_name}: {e}"
+                ))]);
+            }
+        };
+
+        validate_structured_content(
+            result,
+            &resolved.output_validator,
+            &resolved.propagate_result_meta,
+        )
+    }
+}
+
+// The `_meta` entries to forward to a tool, as declared by
+// `propagate-request-meta`, plus the tracing keys in the propagation scope.
+// Non-string `_meta` values are skipped with a warning since a `meta-entry` is
+// a pair of strings.
+fn request_meta_entries(
+    meta: Option<&Meta>,
+    propagate_request_meta: &[PropagatedHeader],
+) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = PROPAGATION_CONTEXT
+        .try_with(|ctx| {
+            ctx.as_ref().map(|c| {
+                c.entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    if let Some(m) = meta {
+        for entry in propagate_request_meta {
+            match m.0.get(entry.source()) {
+                Some(serde_json::Value::String(s)) => {
+                    entries.push((entry.target().to_string(), s.clone()));
+                }
+                Some(other) => {
+                    tracing::warn!(
+                        meta_key = %entry.source(),
+                        value_type = ?other,
+                        "skipping non-string _meta entry declared in propagate-request-meta"
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+
+    entries
+}
+
+// Ensure a tool's structured content conforms to its advertised output schema,
+// and select which `_meta` entries to include with the result.
+fn validate_structured_content(
+    mut result: CallToolResult,
+    output_validator: &Option<jsonschema::Validator>,
+    propagate_result_meta: &[PropagatedHeader],
+) -> CallToolResult {
+    let emitted = result_meta(result.meta.as_ref(), propagate_result_meta);
+
+    if let Some(validator) = output_validator
+        && let Some(structured) = result.structured_content.as_ref()
+        && let Err(error) = validator.validate(structured)
+    {
+        return apply_meta(
+            CallToolResult::error(vec![Content::text(format!(
+                "tool result does not conform to output-schema: {error}"
+            ))]),
+            emitted,
+        );
+    }
+
+    result.meta = None;
+    apply_meta(result, emitted)
+}
+
+// The `_meta` to include with a result.
+fn result_meta(
+    returned: Option<&Meta>,
+    propagate_result_meta: &[PropagatedHeader],
+) -> Option<Meta> {
+    let returned = returned?;
+    let mut map = serde_json::Map::new();
+    for entry in propagate_result_meta {
+        if let Some(value) = returned.0.get(entry.source()) {
+            map.insert(entry.target().to_string(), value.clone());
+        }
+    }
+    (!map.is_empty()).then_some(Meta(map))
 }
 
 // Extract PROPAGATED_HEADERS from a Message into a HashMap.
