@@ -9,24 +9,11 @@ uri = "factory:greeter-function-factory"
 imports = ["target", "mapper"]
 
 [component.target]
-uri = "./lib/greeter.wasm"
+uri = "oci://ghcr.io/modulewise/demo/hello:0.2.0"
 
 [component.mapper]
-uri = "./lib/json-mapper.wasm"
+uri = "oci://ghcr.io/modulewise/component/json-mapper:0.4.0"
 
 [component.greeter-function-factory]
-uri = "./lib/function-factory.wasm"
-imports = ["loader"]
-config.target = "/lib/greeter.wasm"
-
-[component.loader]
-uri = "./lib/filesystem-loader.wasm"
-imports = ["filesystem"]
-
-[capability.filesystem]
-type = "wasi:filesystem"
-
-[[capability.filesystem.preopens]]
-host = "./lib"
-guest = "/lib"
-perms = "read-only"
+uri = "oci://ghcr.io/modulewise/component/function-factory:0.5.0"
+config.wit = "${wit(target)}"
