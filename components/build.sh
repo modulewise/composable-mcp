@@ -1,17 +1,9 @@
-#!/bin/sh
+#!/bin/bash
 
-if [ ! -f lib/http-client.wasm ]; then
-  echo "Fetching http-client component..."
-  wkg oci pull ghcr.io/modulewise/component/http-client:0.4.0 -o lib/http-client.wasm
-fi
-if [ ! -f lib/wasi-logging-to-stdout.wasm ]; then
-  echo "Fetching WASI logging component..."
-  wkg oci pull ghcr.io/componentized/logging/to-stdout:v0.2.1 -o lib/wasi-logging-to-stdout.wasm
-fi
-if [ ! -f lib/stdout-to-stderr.wasm ]; then
-  echo "Fetching stdout-to-stderr adapter..."
-  wkg oci pull ghcr.io/componentized/cli/stdout-to-stderr:v0.1.1 -o lib/stdout-to-stderr.wasm
-fi
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
 
 PROJECTS=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
 

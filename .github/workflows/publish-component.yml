@@ -1,0 +1,124 @@
+name: Publish Component
+
+on:
+  push:
+    tags:
+      - 'component-*-v[0-9]+.[0-9]+.[0-9]+-?**'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Parse tag
+        id: parse
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          rest="${tag#component-}"
+          name="${rest%-v*}"
+          version="${rest##*-v}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Read component metadata
+        id: meta
+        working-directory: components
+        run: |
+          name="${{ steps.parse.outputs.name }}"
+          version="${{ steps.parse.outputs.version }}"
+          json=$(cargo metadata --no-deps --format-version 1 \
+            | jq --arg n "$name" '.packages[] | select(.name == $n)')
+          if [ -z "$json" ]; then
+            echo "Component '$name' not found in cargo workspace" >&2
+            exit 1
+          fi
+          manifest_version=$(echo "$json" | jq -r '.version')
+          if [ "$manifest_version" != "$version" ]; then
+            echo "Tag version ($version) does not match Cargo.toml version ($manifest_version) for $name" >&2
+            exit 1
+          fi
+          description=$(echo "$json" | jq -r '.description // ""')
+          homepage=$(echo "$json" | jq -r '.homepage // ""')
+          repository=$(echo "$json" | jq -r '.repository // ""')
+          license=$(echo "$json" | jq -r '.license // ""')
+          for field in description homepage repository license; do
+            if [ -z "${!field}" ]; then
+              echo "Component '$name' is missing '$field' in Cargo.toml" >&2
+              exit 1
+            fi
+          done
+          echo "description=$description" >> "$GITHUB_OUTPUT"
+          echo "homepage=$homepage" >> "$GITHUB_OUTPUT"
+          echo "source=$repository" >> "$GITHUB_OUTPUT"
+          echo "license=$license" >> "$GITHUB_OUTPUT"
+
+      - name: Add wasm32-unknown-unknown target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.19.1
+
+      - name: Install build tools
+        run: |
+          cargo binstall cargo-auditable --no-confirm
+          cargo binstall auditable2cdx --no-confirm
+          cargo binstall wasm-tools --no-confirm
+
+      - name: Build core wasm with cargo-auditable
+        working-directory: components
+        run: cargo auditable build -p ${{ steps.parse.outputs.name }} --target wasm32-unknown-unknown --release
+
+      - name: Wrap as wasm component
+        working-directory: components
+        run: |
+          name="${{ steps.parse.outputs.name }}"
+          cargo_name="${name//-/_}"
+          wasm-tools component new \
+            "target/wasm32-unknown-unknown/release/${cargo_name}.wasm" \
+            -o "/tmp/${name}.wasm"
+
+      - name: Extract SBOM
+        run: |
+          name="${{ steps.parse.outputs.name }}"
+          auditable2cdx "/tmp/${name}.wasm" > "/tmp/${name}.cdx.json"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish component to GitHub Container Registry
+        id: publish
+        uses: bytecodealliance/wkg-github-action@v5
+        with:
+          file: /tmp/${{ steps.parse.outputs.name }}.wasm
+          oci-reference-without-tag: ghcr.io/modulewise/component/${{ steps.parse.outputs.name }}
+          version: ${{ steps.parse.outputs.version }}
+          description: ${{ steps.meta.outputs.description }}
+          source: ${{ steps.meta.outputs.source }}
+          homepage: ${{ steps.meta.outputs.homepage }}
+          licenses: ${{ steps.meta.outputs.license }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign component
+        run: |
+          cosign sign --yes \
+            ghcr.io/modulewise/component/${{ steps.parse.outputs.name }}@${{ steps.publish.outputs.digest }}
+
+      - name: Attest SBOM
+        run: |
+          name="${{ steps.parse.outputs.name }}"
+          cosign attest --yes \
+            --type cyclonedx \
+            --predicate "/tmp/${name}.cdx.json" \
+            ghcr.io/modulewise/component/${name}@${{ steps.publish.outputs.digest }}
