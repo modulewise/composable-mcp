@@ -1,5 +1,5 @@
 [component.greeter-tool]
-uri = "./lib/tool-adapter.wasm"
+uri = "oci://ghcr.io/modulewise/component/tool-adapter:0.1.0"
 imports = ["greeter-function"]
 config.description = "Greets someone by name"
 config.spec-version = "2026-07-28"
