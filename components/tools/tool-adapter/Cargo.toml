@@ -2,6 +2,10 @@
 name = "tool-adapter"
 version = "0.1.0"
 edition = "2024"
+description = "Tool component that adapts a composable:runtime/function to the composable:tools/tool interface"
+homepage = "https://github.com/modulewise/composable-mcp/tree/main/components/tools"
+license = "Apache-2.0"
+repository = "https://github.com/modulewise/composable-mcp"
 
 [lib]
 crate-type = ["cdylib"]
@@ -9,6 +13,4 @@ crate-type = ["cdylib"]
 [dependencies]
 function-invoker = { git = "https://github.com/modulewise/composable-runtime", branch = "main" }
 serde_json = { version = "1", default-features = false, features = ["alloc", "preserve_order"] }
-wit-bindgen = { version = "0.61", features = ["async-spawn"] }
-
-[workspace]
+wit-bindgen.workspace = true
