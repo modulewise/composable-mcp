@@ -6,13 +6,7 @@ The component here uses the same composition as the `tool-adapter` example.
 
 ## Run
 
-1. Fetch the components and build the tool-adapter:
-
-```sh
-./build.sh
-```
-
-2. Start the MCP Servers and call their tools:
+Start the MCP Servers and call their tools:
 
 ```sh
 ./run.sh

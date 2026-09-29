@@ -8,15 +8,15 @@ uri = "../../components/lib/mcp-client.wasm"
 imports = ["http-client", "logger"]
 
 [component.http-client]
-uri = "../../components/lib/http-client.wasm"
+uri = "oci://ghcr.io/modulewise/component/http-client:0.4.0"
 imports = ["http"]
 
 [component.logger]
-uri = "../../components/lib/wasi-logging-to-stdout.wasm"
+uri = "oci://ghcr.io/componentized/logging/to-stdout:v0.2.1"
 imports = ["stdout-to-stderr", "io", "clocks"]
 
 [component.stdout-to-stderr]
-uri = "../../components/lib/stdout-to-stderr.wasm"
+uri = "oci://ghcr.io/componentized/cli/stdout-to-stderr:v0.1.1"
 imports = ["io", "cli"]
 
 [capability.http]

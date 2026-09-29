@@ -14,7 +14,7 @@ ARGS="${1:-$DEFAULT_ARGS}"
 echo "Calling mcp-tool via otel interceptor with arguments: ${ARGS}"
 
 if command -v jq &>/dev/null; then
-  cargo run --quiet -- "$ARGS" | jq 'fromjson'
+  cargo run --quiet -- "$ARGS" | jq .
 else
   cargo run --quiet -- "$ARGS"
 fi
