@@ -1,6 +1,6 @@
 use anyhow::Result;
 use composable_otel::OtelService;
-use composable_runtime::Runtime;
+use composable_runtime::{Runtime, Val};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -26,11 +26,17 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| r#"{"a":6,"b":7}"#.to_string());
 
     let result = runtime
-        .invoker()
-        .invoke("mcp-tool", "tool.call", vec![serde_json::json!(args)], None)
-        .await?;
+        .host()
+        .invoke(
+            "mcp-tool",
+            "tool.call",
+            vec![Val::Json(serde_json::json!(args)), Val::Json(serde_json::json!([]))],
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("tool.call returned nothing"))?;
 
-    println!("{}", result);
+    println!("{}", result.into_json()?);
 
     // Flush the OtelService batch span processor before exiting.
     runtime.shutdown().await;

@@ -27,7 +27,11 @@ pub fn exports_tool(component: &composable_runtime::Component) -> bool {
         .metadata
         .exports
         .iter()
-        .any(|export| export.starts_with(TOOL_EXPORT))
+        .any(|export| {
+            export
+                .interface_name()
+                .is_some_and(|interface| interface.as_str().starts_with(TOOL_EXPORT))
+        })
 }
 
 /// Build an rmcp `Tool` from `tool.metadata()`.

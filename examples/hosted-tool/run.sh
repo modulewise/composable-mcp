@@ -7,11 +7,6 @@ cd "$DIR"
 
 NAME="${1:-World}"
 
-if [[ ! -f lib/tool-adapter.wasm ]]; then
-  echo "Components are missing. Run ./build.sh first."
-  exit 1
-fi
-
 cargo run --quiet --manifest-path ../../Cargo.toml -- config.toml &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
