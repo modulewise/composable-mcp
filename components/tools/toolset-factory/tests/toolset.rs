@@ -1,5 +1,5 @@
 //! A generated toolset over two tools and a nested toolset, run in wasmtime
-//! with host functions for its members.
+//! with host functions for its imports.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -75,8 +75,8 @@ fn field<'v>(value: &'v Val, name: &str) -> &'v Val {
 /// The names the nested toolset was called with.
 type Calls = Arc<Mutex<Vec<String>>>;
 
-/// The host side of the toolset's members. `alerts_fails` makes the `alerts`
-/// tool's metadata return an error.
+/// The host-provided functions the toolset imports. `alerts_fails` makes the
+/// `alerts` tool's metadata return an error.
 fn linker(engine: &Engine, calls: Calls, alerts_fails: bool) -> Result<Linker<()>> {
     let mut linker = Linker::<()>::new(engine);
     linker.instance(TOOLS)?;
@@ -196,8 +196,8 @@ fn tools_are_listed_and_calls_are_routed() -> Result<()> {
         anyhow::Ok((listed, forecast, nested, unknown))
     })?;
 
-    // A tool is listed under its import name, a nested toolset's tools under
-    // its prefix, and every other field is copied.
+    // A tool is listed by its import name, a nested toolset's tools with its
+    // prefix, and every other field is copied.
     let expected = ok(Val::List(vec![
         metadata("forecast", "The forecast"),
         metadata("alerts", "The alerts"),
@@ -221,7 +221,7 @@ fn tools_are_listed_and_calls_are_routed() -> Result<()> {
 }
 
 #[test]
-fn a_failing_member_fails_the_whole_list() -> Result<()> {
+fn a_failing_delegate_fails_the_whole_list() -> Result<()> {
     let engine = engine()?;
     let component = Component::new(&engine, toolset()?)?;
     let linker = linker(&engine, Calls::default(), true)?;
@@ -243,7 +243,7 @@ fn a_failing_member_fails_the_whole_list() -> Result<()> {
 }
 
 #[test]
-fn a_toolset_needs_a_member_and_unique_names() {
+fn a_toolset_needs_at_least_one_import_and_unique_names() {
     assert!(Builder::new(Vec::new(), Vec::new()).is_err());
     let repeated = Builder::new(vec!["forecast".to_string()], vec!["forecast".to_string()]);
     assert!(repeated.is_err());

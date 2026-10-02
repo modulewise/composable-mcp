@@ -23,15 +23,11 @@ pub const CALL_FUNCTION: &str = "tool.call";
 
 /// Whether a component contributes a tool through `composable:tools/tool`.
 pub fn exports_tool(component: &composable_runtime::Component) -> bool {
-    component
-        .metadata
-        .exports
-        .iter()
-        .any(|export| {
-            export
-                .interface_name()
-                .is_some_and(|interface| interface.as_str().starts_with(TOOL_EXPORT))
-        })
+    component.metadata.exports.iter().any(|export| {
+        export
+            .interface_name()
+            .is_some_and(|interface| interface.as_str().starts_with(TOOL_EXPORT))
+    })
 }
 
 /// Build an rmcp `Tool` from `tool.metadata()`.

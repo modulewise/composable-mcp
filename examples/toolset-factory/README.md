@@ -23,8 +23,8 @@ config.tools = ["greeter"]
 config.toolsets = ["calculator"]
 ```
 
-The toolset-factory generates a component that imports each member under its name, a `tool` for
-each of `tools` and a `toolset` for each of `toolsets`, and exports `composable:tools/toolset`:
+The toolset-factory generates a component that imports each specified `tool` and `toolset`.
+It exports `composable:tools/toolset` and acts as an aggregator/router.
 
 - `greeter` is a local tool: a function over the hello component, adapted to a tool, as in
   [tool-adapter](../tool-adapter).
@@ -35,16 +35,15 @@ Each import is satisfied by the component with its name.
 
 ## Names
 
-`list` returns every member's tools:
+`list` returns metadata for every aggregated tool:
 
-- a tool under its import name, `greeter`, whatever name the tool itself reports
-- a toolset's tools under its import name and `_`, `calculator_add` and so on
+- a tool by its import name: `greeter`
+- a toolset's tools, prefixed by its import name and `_`: e.g. `calculator_add`
 
-`call` routes on those names: `greeter` to the tool, and `calculator_multiply` to the toolset as
-`multiply`. `_` cannot occur in an import name, so a toolset's prefix always ends at the first
-`_`. An unknown name returns MCP's unknown tool error, `-32602`.
+`call` routes on those names:
 
-If any member fails to list its tools, `list` fails with that member's error.
+- `greeter` to the tool
+- `calculator_multiply` to the nested toolset as `multiply`
 
 ## Running the Example
 
@@ -52,7 +51,7 @@ If any member fails to list its tools, `list` fails with that member's error.
 ./run.sh
 ```
 
-It builds and starts the calculator server, then lists the toolset and calls one local and one
+It builds and starts the calculator server, lists the toolset, then calls one local and one
 remote tool:
 
 ```
