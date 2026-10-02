@@ -1,0 +1,8 @@
+package composable-mcp:toolset-factory@0.1.0;
+
+/// Builds a toolset that aggregates the tools and toolsets named in its config.
+world toolset-factory {
+    import wasi:config/store@0.2.0-rc.1;
+
+    export composable:factory/factory@0.4.0;
+}

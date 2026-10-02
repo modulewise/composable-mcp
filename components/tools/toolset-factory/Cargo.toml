@@ -1,0 +1,19 @@
+[package]
+name = "toolset-factory"
+version = "0.1.0"
+edition = "2024"
+description = "Builds a toolset component that aggregates named tool and toolset imports"
+homepage = "https://github.com/modulewise/composable-mcp/tree/main/components/tools"
+license = "Apache-2.0"
+repository = "https://github.com/modulewise/composable-mcp"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+composable-factory = { git = "https://github.com/modulewise/composable-factory", branch = "main" }
+wit-bindgen.workspace = true
+
+[dev-dependencies]
+wasmtime = "49"

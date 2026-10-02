@@ -5,6 +5,7 @@ members = [
     "mcp/mcp-tool",
     "mcp/mcp-toolset",
     "tools/tool-adapter",
+    "tools/toolset-factory",
 ]
 resolver = "3"
 

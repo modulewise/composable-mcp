@@ -1,0 +1,66 @@
+interface deserializer {
+    resource deserializer {
+        // Parse the input JSON (an object keyed by param name).
+        constructor(input: string);
+
+        // Descend into `name` at the cursor, for a value where a walk starts
+        // rather than a record's field. False if not present, thus leaving the
+        // cursor where it is, with no `exit` owed.
+        enter-value: func(name: string) -> bool;
+
+        // The bitmask of `names` the object at the cursor holds, where bit N
+        // is names[N]. Asked once per record, before its fields are read, so
+        // the caller can handle absent fields appropriately. At most 32 names.
+        field-presence: func(names: list<string>) -> u32;
+
+        // Descend into object field `name`. Only called for a field
+        // `field-presence` reported, so there is always one to enter.
+        enter-field: func(name: string);
+
+        // The number of items in the collection at the cursor.
+        length: func() -> u32;
+
+        // Descend into element `index` of the array, or into the value of the
+        // object's `index`th entry. False if out of range.
+        enter-element: func(index: u32) -> bool;
+
+        // The key of the object's `index`th entry, for a map whose keys the
+        // caller must supply one at a time. Empty if out of range.
+        key-at: func(index: u32) -> string;
+
+        // Index of the active case within `names`, or none if it's not listed.
+        case-index: func(names: list<string>) -> option<u32>;
+
+        // Whether there is a value at the cursor, for an `option`. Separate
+        // from `case-index` because an option's cases are always `some` or
+        // `none`, so a source can report presence without matching case names.
+        has-value: func() -> bool;
+
+        // Descend into the active case's payload. Only called when a case has
+        // a payload, which the caller knows from the case `case-index` named.
+        enter-payload: func();
+
+        // The flags set as bits at the positions corresponding to their names.
+        flag-bits: func(names: list<string>) -> result<u32, string>;
+
+        // Ascend to the parent. Exactly one per successful `enter-*`.
+        exit: func();
+
+        // Pull the value at the current cursor as a primitive leaf.
+        // Width-specific getters return values matching the target param's
+        // WIT width.
+        get-string: func() -> string;
+        get-char: func() -> char;
+        get-bool: func() -> bool;
+        get-s8: func() -> s8;
+        get-s16: func() -> s16;
+        get-s32: func() -> s32;
+        get-s64: func() -> s64;
+        get-u8: func() -> u8;
+        get-u16: func() -> u16;
+        get-u32: func() -> u32;
+        get-u64: func() -> u64;
+        get-f32: func() -> f32;
+        get-f64: func() -> f64;
+    }
+}

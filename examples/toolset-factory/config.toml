@@ -1,0 +1,70 @@
+# The toolset, generated for a local tool and a remote toolset.
+[component.toolset]
+uri = "factory:toolset-factory"
+imports = ["greeter", "calculator"]
+
+[component.toolset-factory]
+uri = "../../components/lib/toolset-factory.wasm"
+config.tools = ["greeter"]
+config.toolsets = ["calculator"]
+
+# A local tool: a function for the hello component, adapted to a tool.
+[component.greeter]
+uri = "oci://ghcr.io/modulewise/component/tool-adapter:0.1.0"
+imports = ["greeter-function"]
+config.description = "Greets someone by name"
+config.spec-version = "2026-07-28"
+
+[component.greeter-function]
+uri = "factory:greeter-function-factory"
+imports = ["target", "mapper"]
+
+[component.target]
+uri = "oci://ghcr.io/modulewise/demo/hello:0.2.0"
+
+[component.mapper]
+uri = "oci://ghcr.io/modulewise/component/json-mapper:0.4.0"
+
+[component.greeter-function-factory]
+uri = "oci://ghcr.io/modulewise/component/function-factory:0.5.0"
+config.wit = "${wit(target)}"
+
+# A remote toolset: 4 calculator tools from an MCP server.
+[component.calculator]
+uri = "../../components/lib/mcp-toolset.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3001/mcp"
+
+[component.mcp-client]
+uri = "../../components/lib/mcp-client.wasm"
+imports = ["http-client", "logger"]
+
+[component.http-client]
+uri = "oci://ghcr.io/modulewise/component/http-client:0.4.0"
+imports = ["http"]
+
+[component.logger]
+uri = "oci://ghcr.io/componentized/logging/levels:v0.2.1"
+imports = ["stdout-logger"]
+config."*" = "info"
+
+[component.stdout-logger]
+uri = "oci://ghcr.io/componentized/logging/to-stdout:v0.2.1"
+imports = ["stdout-to-stderr", "io", "clocks"]
+
+[component.stdout-to-stderr]
+uri = "oci://ghcr.io/componentized/cli/stdout-to-stderr:v0.1.1"
+imports = ["io", "cli"]
+
+[capability.http]
+type = "wasi:http"
+
+[capability.io]
+type = "wasi:io-p2"
+
+[capability.clocks]
+type = "wasi:clocks-p2"
+
+[capability.cli]
+type = "wasi:cli-p2"
+inherit-stderr = true
