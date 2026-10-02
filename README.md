@@ -342,6 +342,17 @@ See [examples/otel](examples/otel) for a complete example with Jaeger.
 
 6. Select a Tool, provide parameter values, and click `Run Tool`.
 
+## Examples
+
+- [calculator](examples/calculator): a calculator component's functions exposed as MCP tools
+- [curl](examples/curl): scripts to initialize a session, list tools, and call a tool
+- [tool-adapter](examples/tool-adapter): a component's function adapted to a tool
+- [hosted-tool](examples/hosted-tool): a tool component hosted over MCP
+- [mcp-tool](examples/mcp-tool): one tool of a remote MCP server, as a tool component
+- [mcp-toolset](examples/mcp-toolset): all tools of a remote MCP server, as a toolset component
+- [toolset-factory](examples/toolset-factory): a toolset generated over a local tool and a remote toolset
+- [otel](examples/otel): tracing with OTLP span export
+
 ## License
 
 Copyright (c) 2026 Modulewise Inc and the Modulewise Composable MCP contributors.

@@ -1,0 +1,45 @@
+interface serializer {
+    resource serializer {
+        constructor();
+
+        add-bool: func(b: bool);
+        add-s8: func(n: s8);
+        add-s16: func(n: s16);
+        add-s32: func(n: s32);
+        add-s64: func(n: s64);
+        add-u8: func(n: u8);
+        add-u16: func(n: u16);
+        add-u32: func(n: u32);
+        add-u64: func(n: u64);
+        add-f32: func(n: f32);
+        add-f64: func(n: f64);
+        add-char: func(c: char);
+        add-string: func(s: string);
+        add-null: func();
+
+        begin-object: func();
+        add-key: func(name: string); // the next add-* is this key's value
+        end-object: func();
+        begin-array: func();
+        end-array: func();
+
+        // An enum's case name, which is the whole value.
+        add-enum: func(%case: string);
+
+        // A variant, option, or result case with no payload, whose siblings
+        // might have one. The caller emits one branch per case and calls this
+        // inside the branch.
+        add-case: func(%case: string);
+
+        // The bracket around a case's payload, whose add-* calls follow.
+        begin-case: func(%case: string);
+        end-case: func();
+
+        begin-flags: func();
+        add-flag: func(name: string);
+        end-flags: func();
+
+        // Consume the serializer and return the accumulated JSON string.
+        finish: func() -> string;
+    }
+}
