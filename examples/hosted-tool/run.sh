@@ -7,7 +7,7 @@ cd "$DIR"
 
 NAME="${1:-World}"
 
-cargo run --quiet --manifest-path ../../Cargo.toml -- config.toml &
+cargo run --quiet -p composable-mcp-server -- config.toml &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
