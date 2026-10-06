@@ -492,7 +492,7 @@ dependencies = [
 [[package]]
 name = "composable-interceptor"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#039f6aee76fd946d69ca6e553872bcd9484166de"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
 dependencies = [
  "anyhow",
  "clap",
@@ -530,7 +530,7 @@ dependencies = [
 [[package]]
 name = "composable-otel"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#039f6aee76fd946d69ca6e553872bcd9484166de"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
 dependencies = [
  "anyhow",
  "composable-runtime",
@@ -548,7 +548,7 @@ dependencies = [
 [[package]]
 name = "composable-runtime"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#039f6aee76fd946d69ca6e553872bcd9484166de"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
 dependencies = [
  "anyhow",
  "bytes",

@@ -33,8 +33,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 
 use composable_runtime::{
-    CategoryClaim, Condition, ConfigHandler, MappingConfig, Operator, ParamEncoding, ParamMapping,
-    PropagatedHeader, PropertyMap, ResultDecoding, Selector,
+    CategoryClaim, Condition, ConfigHandler, Definition, GenericDefinition, MappingConfig,
+    Operator, ParamEncoding, ParamMapping, PropagatedHeader, PropertyMap, ResultDecoding, Selector,
 };
 
 // Default component selector for auto-discovery: top-level components only.
@@ -164,12 +164,12 @@ impl ConfigHandler for McpServerConfigHandler {
         )])
     }
 
-    fn handle_category(
-        &mut self,
-        category: &str,
-        name: &str,
-        mut properties: PropertyMap,
-    ) -> Result<()> {
+    fn handle_definition(&mut self, definition: GenericDefinition) -> Result<Vec<Definition>> {
+        let GenericDefinition {
+            category,
+            name,
+            mut properties,
+        } = definition;
         if category != "server" {
             return Err(anyhow::anyhow!(
                 "McpServerConfigHandler received unexpected category '{category}'"
@@ -264,7 +264,7 @@ impl ConfigHandler for McpServerConfigHandler {
             None => "grpc".to_string(),
         };
 
-        let tools = parse_tools(name, &mut properties)?;
+        let tools = parse_tools(&name, &mut properties)?;
 
         if component_selector.is_none() && tools.is_empty() {
             return Err(anyhow::anyhow!(
@@ -281,7 +281,7 @@ impl ConfigHandler for McpServerConfigHandler {
         }
 
         self.servers.lock().unwrap().push(McpServerConfig {
-            name: name.to_string(),
+            name,
             host,
             port,
             allowed_origins,
@@ -290,7 +290,7 @@ impl ConfigHandler for McpServerConfigHandler {
             otlp_endpoint,
             otlp_protocol,
         });
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -716,6 +716,14 @@ mod tests {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 
+    fn server(name: &str, properties: PropertyMap) -> GenericDefinition {
+        GenericDefinition {
+            category: "server".to_string(),
+            name: name.to_string(),
+            properties,
+        }
+    }
+
     #[test]
     fn parse_basic_server() {
         let (mut handler, config) = make_handler();
@@ -734,7 +742,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -776,7 +784,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "api", properties)
+            .handle_definition(server("api", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -797,7 +805,7 @@ mod tests {
         let (mut handler, _) = make_handler();
         let properties = props(vec![("type", serde_json::json!("mcp"))]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         assert!(
             result
@@ -823,7 +831,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -849,7 +857,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -885,7 +893,7 @@ mod tests {
                 ),
             ]);
             let err = handler
-                .handle_category("server", "mcp", properties)
+                .handle_definition(server("mcp", properties))
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -912,7 +920,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -939,7 +947,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         assert_eq!(servers[0].tools[0].propagate_request_meta.len(), 1);
@@ -962,7 +970,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("must have either"), "unexpected error: {err}");
@@ -986,7 +994,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cannot have both"), "unexpected error: {err}");
@@ -1011,7 +1019,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         match &servers[0].tools[0].target {
@@ -1046,7 +1054,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         assert!(matches!(
@@ -1076,7 +1084,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         assert!(matches!(
@@ -1106,7 +1114,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1136,7 +1144,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         let entries = &servers[0].tools[0].propagate_request_meta;
@@ -1167,7 +1175,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
         let servers = config.lock().unwrap();
         let entries = &servers[0].tools[0].propagate_result_meta;
@@ -1194,7 +1202,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1221,7 +1229,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1248,7 +1256,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1275,7 +1283,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
     }
 
@@ -1300,7 +1308,7 @@ mod tests {
             ),
         ]);
         let err = handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1330,7 +1338,7 @@ mod tests {
             ),
         ]);
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
     }
 
@@ -1359,7 +1367,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -1394,7 +1402,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1411,7 +1419,7 @@ mod tests {
             ("port", serde_json::json!(3001)),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         assert!(
             result
@@ -1431,7 +1439,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -1475,7 +1483,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("server", "mcp", properties);
+        let result = handler.handle_definition(server("mcp", properties));
         assert!(result.is_err());
         assert!(
             result
@@ -1496,7 +1504,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
@@ -1526,7 +1534,7 @@ mod tests {
         ]);
 
         handler
-            .handle_category("server", "mcp", properties)
+            .handle_definition(server("mcp", properties))
             .unwrap();
 
         let servers = config.lock().unwrap();
