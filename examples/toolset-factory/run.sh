@@ -19,8 +19,8 @@ done
 
 # The remote side: an MCP server with the calculator tools, on port 3001.
 echo "==> Starting the calculator MCP server..."
-(cd ../.. && cargo build --release --bin toolbelt >/dev/null)
-(cd ../calculator && exec ../../target/release/toolbelt config.toml calculator.wasm) >/dev/null 2>&1 &
+(cd ../.. && cargo build --release -p composable-mcp-server >/dev/null)
+(cd ../calculator && exec ../../target/release/mcp-server config.toml calculator.wasm) >/dev/null 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null' EXIT
 for _ in $(seq 50); do

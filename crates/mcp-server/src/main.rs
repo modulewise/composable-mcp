@@ -2,13 +2,14 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
-use composable_mcp::McpService;
+use composable_mcp_server::McpService;
 use composable_otel::OtelService;
 use composable_runtime::Runtime;
+use composable_tools::ToolService;
 
 #[derive(Parser)]
-#[command(name = "toolbelt")]
-#[command(about = "Modulewise Toolbelt is an MCP Server for Wasm Components")]
+#[command(name = "mcp-server")]
+#[command(about = "An MCP server for Wasm components")]
 struct Cli {
     /// Component definition files (.toml) and standalone .wasm files
     #[arg(help = "Component definition files (.toml) and standalone .wasm files")]
@@ -29,6 +30,7 @@ async fn main() -> Result<()> {
     let runtime = Runtime::builder()
         .from_paths(&cli.definitions)
         .with_service::<OtelService>()
+        .with_service::<ToolService>()
         .with_service::<McpService>()
         .build()
         .await?;

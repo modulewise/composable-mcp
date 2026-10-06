@@ -1,8 +1,8 @@
-mod config;
-mod mapper;
-mod origin;
-mod server;
-mod service;
-mod tools;
+//! Tools and toolsets as components, for any host: an agent's runtime, an MCP
+//! server, or a CLI. `ToolService` contributes the `[tool]` and `[toolset]`
+//! config categories, which expand into the components that implement them.
 
-pub use service::McpService;
+mod config;
+mod service;
+
+pub use service::ToolService;

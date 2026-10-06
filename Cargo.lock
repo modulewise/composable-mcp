@@ -505,14 +505,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "composable-mcp"
-version = "0.5.0-alpha.4"
+name = "composable-mcp-server"
+version = "0.5.0-alpha.5"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "composable-otel",
  "composable-runtime",
+ "composable-tools",
  "jsonschema",
  "opentelemetry 0.31.0",
  "opentelemetry-otlp 0.31.1",
@@ -584,6 +585,15 @@ dependencies = [
  "wasmtime-wasi-io",
  "wit-component 0.259.0",
  "wit-parser 0.259.0",
+]
+
+[[package]]
+name = "composable-tools"
+version = "0.5.0-alpha.5"
+dependencies = [
+ "anyhow",
+ "composable-runtime",
+ "serde_json",
 ]
 
 [[package]]

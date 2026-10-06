@@ -23,10 +23,10 @@ docker compose up -d
 wasm-tools parse add-two.wat -o add-two.wasm
 ```
 
-3. Start toolbelt:
+3. Start the MCP server:
 
 ```sh
-cargo run -- config.toml add-two.wasm
+cargo run -p composable-mcp-server -- config.toml add-two.wasm
 ```
 
 4. Initialize a session, list tools, and call a tool using the curl scripts:
