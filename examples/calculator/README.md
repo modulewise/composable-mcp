@@ -14,10 +14,10 @@ A simple calculator component exposing add, subtract, multiply, and divide as MC
 wasm-tools parse calculator.wat -o calculator.wasm
 ```
 
-2. Start toolbelt:
+2. Start the MCP server:
 
 ```sh
-cargo run -- config.toml calculator.wasm
+cargo run -p composable-mcp-server -- config.toml calculator.wasm
 ```
 
 3. Test with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) or the example curl scripts:

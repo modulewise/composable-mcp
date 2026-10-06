@@ -1,4 +1,4 @@
-# Modulewise Toolbelt
+# Composable MCP
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that exposes [Wasm Components](https://component-model.bytecodealliance.org) as Tools.
 
@@ -13,10 +13,10 @@ Clone the [composable-mcp](https://github.com/modulewise/composable-mcp) project
 Then from within the `composable-mcp` directory:
 
 ```
-cargo install --path .
+cargo install --path crates/mcp-server
 ```
 
-That will build the binary with the `release` profile and add
+That will build the `mcp-server` binary with the `release` profile and add
 it to your cargo bin directory which should be on your PATH.
 
 ## Run Simple Components
@@ -24,14 +24,14 @@ it to your cargo bin directory which should be on your PATH.
 Provide the path to one or more `.wasm` files as command line arguments:
 
 ```sh
-toolbelt hello.wasm calculator.wasm
+mcp-server hello.wasm calculator.wasm
 ```
 
 Or you can specify OCI URIs for published Wasm Components, such as these:
 
 ```sh
-toolbelt oci://ghcr.io/modulewise/demo/hello:0.2.0 \
-         oci://ghcr.io/modulewise/demo/calculator:0.2.0
+mcp-server oci://ghcr.io/modulewise/demo/hello:0.2.0 \
+           oci://ghcr.io/modulewise/demo/calculator:0.2.0
 ```
 
 > [!TIP]
@@ -62,7 +62,7 @@ imports = ["http"]
 Pass the definition file to the server instead of direct `.wasm` files:
 
 ```sh
-toolbelt flights.toml
+mcp-server flights.toml
 ```
 
 Wasm Components can also import other components which may have their own dependencies:
@@ -92,7 +92,7 @@ type = "wasi:p2"
 Now these files can be passed to the server:
 
 ```sh
-toolbelt components.toml capabilities.toml
+mcp-server components.toml capabilities.toml
 ```
 
 This allows for various combinations of host capabilities and guest components.
@@ -101,7 +101,7 @@ supporting infrastructure and domain-centric tools.
 
 ## Configure the MCP Server
 
-When no `[server]` with `type = "mcp"` is configured, toolbelt starts a default
+When no `[server]` with `type = "mcp"` is configured, `mcp-server` starts a default
 MCP server on `127.0.0.1:3001` that auto-discovers top-level components (those
 not imported by other components).
 

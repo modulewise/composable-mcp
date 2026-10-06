@@ -1,30 +1,22 @@
 [package]
-name = "composable-mcp"
-version = "0.5.0-alpha.4"
+name = "composable-tools"
+version.workspace = true
+edition.workspace = true
+
+[workspace]
+members = ["crates/mcp-server"]
+resolver = "3"
+
+[workspace.package]
+version = "0.5.0-alpha.5"
 edition = "2024"
 
-[[bin]]
-name = "toolbelt"
-path = "src/main.rs"
+[workspace.dependencies]
+anyhow = "1"
+composable-runtime = { git = "https://github.com/modulewise/composable-runtime", branch = "main", default-features = false }
+serde_json = "1"
 
 [dependencies]
-anyhow = "1"
-axum = "0.8"
-clap = { version = "4.6", features = ["derive"] }
-composable-otel = { git = "https://github.com/modulewise/composable-runtime", branch = "main" }
-composable-runtime = { git = "https://github.com/modulewise/composable-runtime", branch = "main", default-features = false, features = ["messaging"] }
-jsonschema = { version = "0.46", default-features = false }
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "transport-worker"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
-tempfile = "3"
-wat = "1"
-rmcp = { version = "1.2", features = ["client", "server"] }
+anyhow.workspace = true
+composable-runtime.workspace = true
+serde_json.workspace = true

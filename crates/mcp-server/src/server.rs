@@ -777,9 +777,12 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
-                rmcp::model::Implementation::new("modulewise-toolbelt", env!("CARGO_PKG_VERSION"))
-                    .with_title("Modulewise Toolbelt")
-                    .with_website_url("https://github.com/modulewise/composable-mcp"),
+                rmcp::model::Implementation::new(
+                    "composable-mcp-server",
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .with_title("Composable MCP Server")
+                .with_website_url("https://github.com/modulewise/composable-mcp"),
             )
             .with_instructions(format!(
                 "This server provides {} tools. \
