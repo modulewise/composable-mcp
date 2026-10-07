@@ -11,25 +11,6 @@ use rmcp::model::{
 };
 use serde_json::Value;
 
-/// The interface a component exports to be hosted as a tool. Matching
-/// includes the version separator, since `tool` is a prefix of `toolset`.
-pub const TOOL_EXPORT: &str = "composable:tools/tool@";
-
-/// The function key for `metadata` on that interface.
-pub const METADATA_FUNCTION: &str = "tool.metadata";
-
-/// The function key for `call`.
-pub const CALL_FUNCTION: &str = "tool.call";
-
-/// Whether a component contributes a tool through `composable:tools/tool`.
-pub fn exports_tool(component: &composable_runtime::Component) -> bool {
-    component.metadata.exports.iter().any(|export| {
-        export
-            .interface_name()
-            .is_some_and(|interface| interface.as_str().starts_with(TOOL_EXPORT))
-    })
-}
-
 /// Build an rmcp `Tool` from `tool.metadata()`.
 pub fn tool_from_metadata(value: &Value, name: &str) -> Result<Tool, String> {
     let object = as_object(value, "tool-metadata")?;
@@ -67,16 +48,6 @@ pub fn call_tool_result(value: &Value) -> Result<CallToolResult, String> {
     };
     result.meta = meta(object.get("meta"))?;
     Ok(result)
-}
-
-/// The `_meta` entries to send a tool, as an array of `[key, value]` pairs.
-pub fn meta_entries(entries: impl IntoIterator<Item = (String, String)>) -> Value {
-    Value::Array(
-        entries
-            .into_iter()
-            .map(|(key, value)| Value::Array(vec![Value::String(key), Value::String(value)]))
-            .collect(),
-    )
 }
 
 fn content_block(value: &Value) -> Result<Content, String> {
@@ -627,23 +598,5 @@ mod tests {
         let err = call_tool_result(&with_priority(1.5)).unwrap_err();
         assert!(err.contains("between 0 and 1"), "unexpected error: {err}");
         assert!(call_tool_result(&with_priority(-0.1)).is_err());
-    }
-
-    #[test]
-    fn meta_entries_are_pairs() {
-        let value = meta_entries([("traceparent".to_string(), "00-abc".to_string())]);
-        assert_eq!(value, serde_json::json!([["traceparent", "00-abc"]]));
-    }
-
-    #[test]
-    fn no_meta_entries_is_an_empty_list() {
-        assert_eq!(meta_entries([]), serde_json::json!([]));
-    }
-
-    #[test]
-    fn exports_matching_includes_the_version_separator() {
-        // `composable:tools/toolset` also starts with `composable:tools/tool`.
-        assert!("composable:tools/tool@0.2.0".starts_with(TOOL_EXPORT));
-        assert!(!"composable:tools/toolset@0.2.0".starts_with(TOOL_EXPORT));
     }
 }

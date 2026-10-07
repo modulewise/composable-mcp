@@ -139,7 +139,7 @@ fn toolset(name: &str, properties: &mut PropertyMap) -> Result<Vec<Definition>> 
     let tools = names(name, "tools", properties)?;
     let toolsets = names(name, "toolsets", properties)?;
     if tools.is_empty() && toolsets.is_empty() {
-        bail!("Toolset '{name}' needs at least one of 'tools' or 'toolsets'");
+        bail!("Toolset '{name}' requires at least one of 'tools' or 'toolsets'");
     }
     let factory = format!("_{name}-factory");
 
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_needs_a_target() {
+    fn a_tool_requires_a_target() {
         let error = ToolConfigHandler::default()
             .handle_definition(definition("tool", "forecast", json!({})))
             .unwrap_err()
@@ -361,11 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn a_toolset_needs_at_least_one_member() {
+    fn a_toolset_requires_at_least_one_member() {
         let error = ToolConfigHandler::default()
             .handle_definition(definition("toolset", "outlook", json!({ "tools": [] })))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("needs at least one"), "{error}");
+        assert!(error.contains("requires at least one"), "{error}");
     }
 }

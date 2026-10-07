@@ -492,7 +492,7 @@ dependencies = [
 [[package]]
 name = "composable-interceptor"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#2fea3869cfb32a4e8c6552c93b2aeccb49f5773d"
 dependencies = [
  "anyhow",
  "clap",
@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "composable-otel"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#2fea3869cfb32a4e8c6552c93b2aeccb49f5773d"
 dependencies = [
  "anyhow",
  "composable-runtime",
@@ -549,7 +549,7 @@ dependencies = [
 [[package]]
 name = "composable-runtime"
 version = "0.5.0-alpha.5"
-source = "git+https://github.com/modulewise/composable-runtime?branch=main#72de450d9f23762d0c97746d15cc4e8410964a95"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#2fea3869cfb32a4e8c6552c93b2aeccb49f5773d"
 dependencies = [
  "anyhow",
  "bytes",
@@ -594,6 +594,22 @@ dependencies = [
  "anyhow",
  "composable-runtime",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "composable-tools-cli"
+version = "0.5.0-alpha.5"
+dependencies = [
+ "anyhow",
+ "clap",
+ "composable-otel",
+ "composable-runtime",
+ "composable-tools",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -14,10 +14,11 @@ Then from within the `composable-mcp` directory:
 
 ```
 cargo install --path crates/mcp-server
+cargo install --path crates/cli
 ```
 
-That will build the `mcp-server` binary with the `release` profile and add
-it to your cargo bin directory which should be on your PATH.
+That will build the `mcp-server` and `tools` binaries with the `release`
+profile and add them to your cargo bin directory which should be on your PATH.
 
 ## Run Simple Components
 
@@ -350,8 +351,8 @@ See [examples/otel](examples/otel) for a complete example with Jaeger.
 - [mcp-tool](examples/mcp-tool): one tool of a remote MCP server, as a tool component
 - [mcp-toolset](examples/mcp-toolset): all tools of a remote MCP server, as a toolset component
 - [otel](examples/otel): tracing with OTLP span export
-- [tool-adapter](examples/tool-adapter): a component's function adapted to a tool
-- [toolset-factory](examples/toolset-factory): a toolset generated over a local tool and a remote toolset
+- [tool](examples/tool): a component's function as a tool
+- [toolset](examples/toolset): a toolset that includes a local tool and a nested remote toolset
 
 ## License
 
