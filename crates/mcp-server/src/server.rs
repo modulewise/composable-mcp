@@ -50,6 +50,7 @@ use composable_runtime::{
     ComponentHost, Message, MessageBuilder, MessageHeaders, MessagePublisher, PROPAGATED_HEADERS,
     PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, Val, schema,
 };
+use composable_tools::{TOOL_CALL, meta_entries};
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -334,10 +335,10 @@ impl McpServer {
             .component_host
             .invoke(
                 component_name,
-                tools::CALL_FUNCTION,
+                TOOL_CALL,
                 vec![
                     Val::Json(serde_json::Value::String(arguments)),
-                    Val::Json(tools::meta_entries(entries)),
+                    Val::Json(meta_entries(entries)),
                 ],
                 None,
             )
@@ -348,7 +349,7 @@ impl McpServer {
             Ok(None) => {
                 return CallToolResult::error(vec![Content::text(format!(
                     "{component_name}: {} returned nothing",
-                    tools::CALL_FUNCTION,
+                    TOOL_CALL,
                 ))]);
             }
             Err(e) => {

@@ -4,23 +4,20 @@ A simple calculator component exposing add, subtract, multiply, and divide as MC
 
 ## Prerequisites
 
+- `mcp-server` (from the repository root: `cargo install --path crates/mcp-server`)
 - `wasm-tools` (`cargo install wasm-tools`)
 
 ## Run
 
-1. Compile the component:
+1. Start the MCP server on port 3001:
 
 ```sh
-wasm-tools parse calculator.wat -o calculator.wasm
+./run.sh
 ```
 
-2. Start the MCP server:
+That script also compiles the component via `wasm-tools parse calculator.wat -o calculator.wasm`.
 
-```sh
-cargo run -p composable-mcp-server -- config.toml calculator.wasm
-```
-
-3. Test with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) or the example curl scripts:
+2. Test with the example curl scripts:
 
 ```sh
 ../curl/initialize.sh
@@ -28,3 +25,5 @@ cargo run -p composable-mcp-server -- config.toml calculator.wasm
 ../curl/call_tool.sh add a=4 b=3
 ../curl/call_tool.sh divide a=99 b=11
 ```
+
+(or use [MCP Inspector](https://github.com/modelcontextprotocol/inspector))

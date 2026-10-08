@@ -16,6 +16,7 @@ use crate::mapper::McpMapper;
 use crate::origin::OriginPolicy;
 use crate::server::McpServer;
 use crate::tools;
+use composable_tools::{TOOL_EXPORT, TOOL_METADATA, exports_tool};
 
 pub struct McpService {
     config: SharedConfig,
@@ -82,7 +83,7 @@ async fn resolve_tools(
     if let Some(selector) = &server_config.component_selector {
         let components = component_host.list_components(Some(selector));
         for component in components {
-            if tools::exports_tool(component) {
+            if exports_tool(component) {
                 let tool_name = component.metadata.name.clone();
                 let resolved = resolve_tool_component(
                     &server_config.name,
@@ -369,16 +370,16 @@ async fn resolve_tool_component(
              '{component_name}'"
             )
         })?;
-    if !tools::exports_tool(component) {
+    if !exports_tool(component) {
         return Err(anyhow::anyhow!(
             "Server '{server_name}': tool '{tool_name}': component '{component_name}' does not \
              export '{}'. To invoke one of its WIT functions instead, declare a 'function'.",
-            tools::TOOL_EXPORT.trim_end_matches('@'),
+            TOOL_EXPORT.trim_end_matches('@'),
         ));
     }
 
     let reported = component_host
-        .invoke(component_name, tools::METADATA_FUNCTION, vec![], None)
+        .invoke(component_name, TOOL_METADATA, vec![], None)
         .await
         .map_err(|e| {
             anyhow::anyhow!("Server '{server_name}': tool '{tool_name}': {component_name}: {e}")
@@ -387,7 +388,7 @@ async fn resolve_tool_component(
             anyhow::anyhow!(
                 "Server '{server_name}': tool '{tool_name}': {component_name}: \
                  {} returned nothing",
-                tools::METADATA_FUNCTION,
+                TOOL_METADATA,
             )
         })?;
     let reported = reported.into_json().map_err(|e| {
