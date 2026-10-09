@@ -12,13 +12,13 @@ use serde_json::{Map, Value, json};
 const TOOL_ADAPTER: &str = "oci://ghcr.io/modulewise/component/tool-adapter:0.1.0";
 
 /// Generates a `composable:runtime/function` for a target's function.
-const FUNCTION_FACTORY: &str = "oci://ghcr.io/modulewise/component/function-factory:0.5.0";
+const FUNCTION_FACTORY: &str = "oci://ghcr.io/modulewise/component/function-factory:0.5.1";
 
 /// Maps between JSON and the WIT values of generated functions.
 const JSON_MAPPER: &str = "oci://ghcr.io/modulewise/component/json-mapper:0.4.0";
 
 /// Generates a `composable:tools/toolset` over named tools and toolsets.
-const TOOLSET_FACTORY: &str = "oci://ghcr.io/modulewise/component/toolset-factory:0.1.0";
+const TOOLSET_FACTORY: &str = "oci://ghcr.io/modulewise/component/toolset-factory:0.1.1";
 
 /// The mapper every generated function imports, emitted once.
 const JSON_MAPPER_NAME: &str = "_json-mapper";
