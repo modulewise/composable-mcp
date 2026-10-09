@@ -28,5 +28,5 @@ uri = "oci://ghcr.io/modulewise/demo/hello:0.2.0"
 uri = "oci://ghcr.io/modulewise/component/json-mapper:0.4.0"
 
 [component.greeter-function-factory]
-uri = "oci://ghcr.io/modulewise/component/function-factory:0.5.0"
+uri = "oci://ghcr.io/modulewise/component/function-factory:0.5.1"
 config.wit = "${wit(target)}"
