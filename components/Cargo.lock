@@ -99,8 +99,8 @@ dependencies = [
 
 [[package]]
 name = "composable-factory"
-version = "0.5.0"
-source = "git+https://github.com/modulewise/composable-factory?branch=main#068785c1494637d9fe124812bcc93720d92a8aa1"
+version = "0.6.0"
+source = "git+https://github.com/modulewise/composable-factory?branch=main#a86e9b25efcfde110621056b97042f25e9bb13b9"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "toolset-factory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "composable-factory",

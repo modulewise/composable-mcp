@@ -1,6 +1,6 @@
 [package]
 name = "toolset-factory"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Builds a toolset component that aggregates named tool and toolset imports"
 homepage = "https://github.com/modulewise/composable-mcp/tree/main/components/tools"

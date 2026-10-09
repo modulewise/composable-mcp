@@ -1,4 +1,4 @@
-package composable-mcp:toolset-factory@0.1.0;
+package composable-mcp:toolset-factory@0.1.1;
 
 /// Builds a toolset that aggregates the tools and toolsets named in its config.
 world toolset-factory {
