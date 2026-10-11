@@ -1,5 +1,5 @@
-# Tests the `mcp-tool` and `mcp-tool` components against the MCP reference
-# `server-everything` on port 3002 (started by `test.sh`).
+# Tests the `mcp-client`, `mcp-tool`, and `mcp-toolset` components against the
+# "Everything" MCP reference server on port 3002 (started by `test.sh`).
 
 [component.everything]
 uri = "../../../lib/mcp-toolset.wasm"
