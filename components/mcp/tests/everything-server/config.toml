@@ -1,0 +1,111 @@
+# Tests the `mcp-tool` and `mcp-tool` components against the MCP reference
+# `server-everything` on port 3002 (started by `test.sh`).
+
+[component.everything]
+uri = "../../../lib/mcp-toolset.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+
+[component.echo]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "echo"
+
+[component.get-annotated-message]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-annotated-message"
+
+[component.get-env]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-env"
+
+[component.get-resource-links]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-resource-links"
+
+[component.get-resource-reference]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-resource-reference"
+
+[component.get-structured-content]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-structured-content"
+
+[component.get-sum]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-sum"
+
+[component.get-tiny-image]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "get-tiny-image"
+
+[component.gzip-file-as-resource]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "gzip-file-as-resource"
+
+[component.simulate-research-query]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "simulate-research-query"
+
+[component.toggle-simulated-logging]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "toggle-simulated-logging"
+
+[component.toggle-subscriber-updates]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "toggle-subscriber-updates"
+
+[component.trigger-long-running-operation]
+uri = "../../../lib/mcp-tool.wasm"
+imports = ["mcp-client"]
+config.server-url = "http://localhost:3002/mcp"
+config.tool-name = "trigger-long-running-operation"
+
+[component.mcp-client]
+uri = "../../../lib/mcp-client.wasm"
+imports = ["http-client", "logger"]
+
+[component.http-client]
+uri = "oci://ghcr.io/modulewise/component/http-client:0.4.0"
+imports = ["http"]
+
+[component.logger]
+uri = "oci://ghcr.io/componentized/logging/to-stdout:0.3.0"
+imports = ["stdout-to-stderr", "cli", "clocks"]
+
+[component.stdout-to-stderr]
+uri = "oci://ghcr.io/componentized/cli/stdout-to-stderr:0.2.0"
+imports = ["cli"]
+
+[capability.http]
+type = "wasi:http"
+
+[capability.clocks]
+type = "wasi:clocks"
+
+[capability.cli]
+type = "wasi:cli"
+inherit-stderr = true
