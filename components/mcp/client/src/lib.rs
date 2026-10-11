@@ -104,8 +104,6 @@ impl exports::composable::mcp::client::GuestSession for Session {
         })
         .to_string();
 
-        log_debug(&format!("tools/list request body: {}", request_body));
-
         let HttpResponse {
             status,
             headers,
@@ -121,10 +119,6 @@ impl exports::composable::mcp::client::GuestSession for Session {
 
         let body = body.collect().await;
         let response_body = String::from_utf8_lossy(&body);
-        log_debug(&format!(
-            "tools/list response body length: {}",
-            response_body.len()
-        ));
 
         check_http_status(status, &response_body)?;
 
@@ -176,8 +170,6 @@ impl exports::composable::mcp::client::GuestSession for Session {
             "Calling tool '{}' on server: {}, session_id: {}, request_id: {}",
             request.name, self.server_url, self.session_id, request_id
         ));
-        log_debug(&format!("Tool arguments: {:?}", request.arguments));
-
         let mut params = json!({ "name": request.name });
         let args: serde_json::Value =
             serde_json::from_str(&request.arguments).unwrap_or(serde_json::json!({}));
@@ -194,8 +186,6 @@ impl exports::composable::mcp::client::GuestSession for Session {
         })
         .to_string();
 
-        log_debug(&format!("tools/call request body: {}", request_body));
-
         let HttpResponse {
             status,
             headers,
@@ -211,7 +201,6 @@ impl exports::composable::mcp::client::GuestSession for Session {
 
         let body = body.collect().await;
         let response_body = String::from_utf8_lossy(&body);
-        log_debug(&format!("tools/call response body: {}", response_body));
 
         check_http_status(status, &response_body)?;
 
@@ -277,8 +266,6 @@ async fn post(
 ) -> Result<HttpResponse, String> {
     use composable::http::client;
 
-    log_debug(&format!("HTTP POST to URL: {}", url));
-
     let mut headers = vec![
         ("Content-Type".to_string(), "application/json".to_string()),
         (
@@ -292,8 +279,6 @@ async fn post(
     if let Some(pv) = protocol_version {
         headers.push(("MCP-Protocol-Version".to_string(), pv.to_string()));
     }
-
-    log_debug(&format!("HTTP POST headers: {:?}", headers));
 
     let (mut body_tx, body_rx) = wit_stream::new::<u8>();
     let body_bytes = body.to_vec();
@@ -336,11 +321,6 @@ async fn initialize_session(
     server_url: &str,
     request: Option<InitializeRequest>,
 ) -> Result<InitializeResponse, String> {
-    log_debug(&format!(
-        "Starting session initialization with server: {}",
-        server_url
-    ));
-
     let request = request.unwrap_or_default();
 
     let protocol_version = request
@@ -382,8 +362,6 @@ async fn initialize_session(
     })
     .to_string();
 
-    log_debug(&format!("Sending initialize request: {}", request_body));
-
     let HttpResponse {
         status,
         headers,
@@ -393,10 +371,6 @@ async fn initialize_session(
 
     let body = body.collect().await;
     let response_body = String::from_utf8_lossy(&body);
-    log_debug(&format!(
-        "Initialize response status: {}, body: {}",
-        status, response_body
-    ));
 
     if status != 200 {
         let message = format!("Initialize failed with status: {status}");
@@ -404,7 +378,6 @@ async fn initialize_session(
         return Err(message);
     }
 
-    log_debug(&format!("Response headers: {:?}", headers));
     let content_type = get_content_type(&headers);
     let envelope = parse_response(&response_body, &content_type)?;
     let id = envelope_id(&envelope, 1)?;
@@ -427,8 +400,6 @@ async fn initialize_session(
             log_error("No MCP-Session-Id header in response");
             "No session ID in response".to_string()
         })?;
-
-    log_debug(&format!("Got session ID: {}", session_id));
 
     let result = &envelope["result"];
 
@@ -483,7 +454,6 @@ async fn initialize_session(
     )
     .await?;
 
-    log_debug("Session initialization complete");
     Ok(InitializeResponse {
         id,
         payload: InitializePayload::Result(InitializeResult {
@@ -626,7 +596,7 @@ fn parse_sse_response(body: &str) -> Result<serde_json::Value, String> {
 
     for event in &events {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(event) else {
-            log_debug(&format!("Skipping non-JSON SSE event data: {}", event));
+            log_debug("Skipping non-JSON SSE event data");
             continue;
         };
         if is_jsonrpc_response(&value) {
@@ -634,7 +604,7 @@ fn parse_sse_response(body: &str) -> Result<serde_json::Value, String> {
         }
         log_debug(&format!(
             "Skipping non-response JSON-RPC message in SSE stream: {}",
-            value
+            value["method"].as_str().unwrap_or("(no method)")
         ));
     }
 
