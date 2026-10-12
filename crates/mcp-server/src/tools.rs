@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
+use rmcp::ErrorData;
 use rmcp::model::{
-    Annotations, AudioContent, CallToolResult, ContentBlock, EmbeddedResource, ImageContent,
-    MetaObject, Resource, ResourceContents, Role, TextContent, Tool, ToolAnnotations,
+    Annotations, AudioContent, CallToolResult, ContentBlock, EmbeddedResource, ErrorCode,
+    ImageContent, MetaObject, Resource, ResourceContents, Role, TextContent, Tool, ToolAnnotations,
 };
 use serde_json::Value;
 
@@ -48,6 +49,21 @@ pub fn call_tool_result(value: &Value) -> Result<CallToolResult, String> {
     };
     result.meta = meta(object.get("meta"))?;
     Ok(result)
+}
+
+/// Build the JSON-RPC error for a `tool-error` from `tool.call()`.
+pub fn tool_error(value: &Value) -> Result<ErrorData, String> {
+    let object = as_object(value, "tool-error")?;
+    let code = object
+        .get("code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .ok_or_else(|| "'code' must be a 32-bit integer".to_string())?;
+    Ok(ErrorData::new(
+        ErrorCode(code),
+        required_string(object, "message")?,
+        optional_json(object, "data")?,
+    ))
 }
 
 fn content_block(value: &Value) -> Result<ContentBlock, String> {
@@ -498,6 +514,32 @@ mod tests {
             result.meta.unwrap().0.get("x-count"),
             Some(&Value::String("3".to_string()))
         );
+    }
+
+    #[test]
+    fn a_tool_error_becomes_the_json_rpc_error_it_describes() {
+        let value = serde_json::json!({
+            "code": -32602,
+            "message": "Unknown tool: missing",
+            "data": "{\"tool\":\"missing\"}"
+        });
+        let error = tool_error(&value).unwrap();
+        assert_eq!(error.code, ErrorCode(-32602));
+        assert_eq!(error.message, "Unknown tool: missing");
+        assert_eq!(error.data, Some(serde_json::json!({ "tool": "missing" })));
+    }
+
+    #[test]
+    fn a_tool_error_without_data_has_none() {
+        let value = serde_json::json!({ "code": -32603, "message": "down", "data": null });
+        assert_eq!(tool_error(&value).unwrap().data, None);
+    }
+
+    #[test]
+    fn a_tool_error_code_must_fit_32_bits() {
+        let value = serde_json::json!({ "code": 4_294_967_296_i64, "message": "x", "data": null });
+        let err = tool_error(&value).unwrap_err();
+        assert!(err.contains("32-bit integer"), "unexpected error: {err}");
     }
 
     #[test]
