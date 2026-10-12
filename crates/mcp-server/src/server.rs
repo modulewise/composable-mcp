@@ -32,7 +32,7 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
         InitializeRequestParams, InitializeResult, JsonObject, ListToolsResult, MetaObject,
-        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -468,6 +468,39 @@ fn tool_execution_error(
     )
 }
 
+// Whether a session's negotiated protocol version predates 2026-07-28, the
+// first to admit any JSON Schema as an output schema and any JSON value as
+// structured content. Earlier versions require both to be objects.
+fn is_legacy(protocol_version: Option<ProtocolVersion>) -> bool {
+    !protocol_version.is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
+}
+
+// A tool within a legacy session. If its root is not `type: "object"`, its
+// output schema will be omitted.
+fn legacy_tool(mut tool: Tool) -> Tool {
+    if tool
+        .output_schema
+        .as_ref()
+        .is_some_and(|schema| schema.get("type").and_then(|t| t.as_str()) != Some("object"))
+    {
+        tool.output_schema = None;
+    }
+    tool
+}
+
+// A result as returned within a legacy session. If not an object, structured
+// content is omitted, leaving the content blocks that carry it as text.
+fn legacy_result(mut result: CallToolResult) -> CallToolResult {
+    if result
+        .structured_content
+        .as_ref()
+        .is_some_and(|value| !value.is_object())
+    {
+        result.structured_content = None;
+    }
+    result
+}
+
 // The `_meta` entries propagate-result-meta selects from a set of headers,
 // each keyed by its target name.
 fn selected_result_meta(
@@ -725,6 +758,7 @@ impl ServerHandler for McpServer {
 
         let span_ctx = self.start_mcp_span("tools/call", Some(tool_name), attrs, meta);
 
+        let legacy = is_legacy(context.protocol_version());
         let context = span_ctx.as_ref().map(|(_, ctx)| ctx.clone());
 
         let (mut span, result) = {
@@ -749,7 +783,12 @@ impl ServerHandler for McpServer {
             span.end();
         }
 
-        result
+        match result {
+            Ok(CallToolResponse::Complete(complete)) if legacy => {
+                Ok(legacy_result(complete).into())
+            }
+            other => other,
+        }
     }
 
     async fn initialize(
@@ -788,7 +827,13 @@ impl ServerHandler for McpServer {
         };
         let span_ctx = self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
 
-        let tools = self.tools.values().map(|r| r.tool.clone()).collect();
+        let legacy = is_legacy(context.protocol_version());
+        let tools = self
+            .tools
+            .values()
+            .map(|r| r.tool.clone())
+            .map(|tool| if legacy { legacy_tool(tool) } else { tool })
+            .collect();
         let result = ListToolsResult::with_all_items(tools);
 
         if let Some((mut span, _)) = span_ctx {
@@ -858,7 +903,7 @@ mod tests {
     use crate::mapper::McpMapper;
     use composable_runtime::Runtime;
     use rmcp::model::ClientConfig;
-    use rmcp::{ClientHandler, ServiceExt};
+    use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
     use std::io::Write as _;
     use tempfile::Builder;
 
@@ -1404,12 +1449,18 @@ mod tests {
         )
     }
 
+    // A test client, requesting `protocol_version` in `initialize` when set.
     #[derive(Debug, Clone, Default)]
-    struct TestClientHandler;
+    struct TestClientHandler {
+        protocol_version: Option<ProtocolVersion>,
+    }
 
     impl ClientHandler for TestClientHandler {
         fn get_info(&self) -> ClientConfig {
-            ClientConfig::default()
+            match &self.protocol_version {
+                Some(version) => ClientConfig::default().with_protocol_version(version.clone()),
+                None => ClientConfig::default(),
+            }
         }
     }
 
@@ -1437,6 +1488,21 @@ mod tests {
     }
 
     async fn setup_test_client(server_handler: McpServer) -> TestClient {
+        setup_test_client_as(
+            server_handler,
+            TestClientHandler::default(),
+            rmcp::ClientLifecycleMode::Initialize,
+        )
+        .await
+    }
+
+    // A test client opening its session with `lifecycle`: `Initialize` for a
+    // legacy session, `Discover` for a modern one.
+    async fn setup_test_client_as(
+        server_handler: McpServer,
+        client_handler: TestClientHandler,
+        lifecycle: rmcp::ClientLifecycleMode,
+    ) -> TestClient {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
         let server_handle = tokio::spawn(async move {
@@ -1448,7 +1514,10 @@ mod tests {
             anyhow::Ok(())
         });
 
-        let client = TestClientHandler.serve(client_transport).await.unwrap();
+        let client = client_handler
+            .serve_with_lifecycle(client_transport, lifecycle)
+            .await
+            .unwrap();
 
         TestClient {
             client: Some(client),
@@ -1660,5 +1729,122 @@ mod tests {
             text.contains("template references unknown path"),
             "unexpected error: {text}"
         );
+    }
+
+    #[test]
+    fn sessions_before_2026_07_28_are_legacy() {
+        assert!(is_legacy(Some(ProtocolVersion::V_2025_11_25)));
+        assert!(is_legacy(Some(ProtocolVersion::V_2024_11_05)));
+        assert!(is_legacy(None));
+        assert!(!is_legacy(Some(ProtocolVersion::V_2026_07_28)));
+    }
+
+    #[test]
+    fn a_legacy_tool_keeps_only_an_object_output_schema() {
+        let object = serde_json::json!({ "type": "object", "properties": {} });
+        let number = serde_json::json!({ "type": "number" });
+        let kept = legacy_tool(tool_with_output_schema(Some(object.clone())));
+        assert_eq!(
+            serde_json::Value::Object((*kept.output_schema.unwrap()).clone()),
+            object
+        );
+        assert!(
+            legacy_tool(tool_with_output_schema(Some(number)))
+                .output_schema
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_legacy_result_keeps_only_object_structured_content() {
+        let object = legacy_result(CallToolResult::structured(serde_json::json!({ "n": 7 })));
+        assert_eq!(
+            object.structured_content,
+            Some(serde_json::json!({ "n": 7 }))
+        );
+
+        // Without structured content, the value is still in the text content.
+        let number = legacy_result(CallToolResult::structured(serde_json::json!(7)));
+        assert!(number.structured_content.is_none());
+        assert_eq!(number.content[0].as_text().unwrap().text, "7");
+    }
+
+    // Give every tool `schema` as its output schema, as an explicit tool
+    // configuration does.
+    fn with_output_schema(mut server: McpServer, schema: serde_json::Value) -> McpServer {
+        for resolved in server.tools.values_mut() {
+            resolved.tool = resolved
+                .tool
+                .clone()
+                .with_raw_output_schema(Arc::new(schema.as_object().unwrap().clone()));
+            resolved.output_validator = Some(jsonschema::validator_for(&schema).unwrap());
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn test_legacy_session_omits_non_object_output() {
+        // Before 2026-07-28, an output schema and structured content must be
+        // objects, so a number result is listed without its output schema and
+        // returned as text only.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let server = with_output_schema(
+            build_test_server(&runtime),
+            serde_json::json!({ "type": "number" }),
+        );
+        let client = setup_test_client_as(
+            server,
+            TestClientHandler {
+                protocol_version: Some(ProtocolVersion::V_2025_11_25),
+            },
+            rmcp::ClientLifecycleMode::Initialize,
+        )
+        .await;
+
+        let tool = client.list_tools(None).await.unwrap().tools[0].clone();
+        assert!(tool.output_schema.is_none());
+
+        let result = client
+            .call_tool(CallToolRequestParams::new(tool.name).with_arguments(args!({ "x": 5 })))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(result.structured_content.is_none());
+        assert_eq!(result.content[0].as_text().unwrap().text, "7");
+    }
+
+    #[tokio::test]
+    async fn test_modern_session_keeps_non_object_output() {
+        // From 2026-07-28, any output schema and any structured content are
+        // allowed, so the number result keeps both.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let server = with_output_schema(
+            build_test_server(&runtime),
+            serde_json::json!({ "type": "number" }),
+        );
+        let client = setup_test_client_as(
+            server,
+            TestClientHandler::default(),
+            rmcp::ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await;
+
+        let tool = client.list_tools(None).await.unwrap().tools[0].clone();
+        assert_eq!(
+            tool.output_schema
+                .map(|schema| serde_json::Value::Object((*schema).clone())),
+            Some(serde_json::json!({ "type": "number" }))
+        );
+
+        let result = client
+            .call_tool(CallToolRequestParams::new(tool.name).with_arguments(args!({ "x": 5 })))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(result.structured_content, Some(serde_json::json!(7)));
     }
 }
