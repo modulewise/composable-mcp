@@ -30,9 +30,9 @@ use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, InitializeRequestParams, InitializeResult,
-        JsonObject, ListToolsResult, Meta, PaginatedRequestParams, ServerCapabilities, ServerInfo,
-        Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        InitializeRequestParams, InitializeResult, JsonObject, ListToolsResult, MetaObject,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -129,7 +129,7 @@ impl McpServer {
         method: &str,
         target: Option<&str>,
         mut attributes: Vec<KeyValue>,
-        meta: Option<&Meta>,
+        meta: Option<&MetaObject>,
     ) -> Option<(opentelemetry_sdk::trace::Span, HashMap<String, String>)> {
         let tp = self.tracer_provider.as_ref()?;
         let tracer = tp.tracer("modulewise.composable.mcp.server");
@@ -186,18 +186,18 @@ impl McpServer {
         &self,
         tool_name: &str,
         arguments: &JsonObject,
-        meta: Option<&Meta>,
+        meta: Option<&MetaObject>,
         context: Option<HashMap<String, String>>,
     ) -> CallToolResult {
         let Some(resolved) = self.tools.get(tool_name) else {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "Tool not found: {tool_name}"
             ))]);
         };
 
         let args_value = serde_json::Value::Object(arguments.clone());
         if let Err(error) = resolved.input_validator.validate(&args_value) {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "Invalid arguments for tool '{tool_name}': {error}"
             ))]);
         }
@@ -221,7 +221,7 @@ impl McpServer {
                 &resolved.propagate_request_meta,
             ) {
                 Ok(m) => m,
-                Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
             };
 
             let reply = match &resolved.target {
@@ -232,7 +232,7 @@ impl McpServer {
                 } => {
                     let invocation = match mapper.to_invocation(&message) {
                         Ok(inv) => inv,
-                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                        Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
                     };
                     let wit_result = match self
                         .component_host
@@ -246,7 +246,7 @@ impl McpServer {
                     {
                         Ok(v) => v,
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(e.to_string())]);
+                            return CallToolResult::error(vec![ContentBlock::text(e.to_string())]);
                         }
                     };
                     // The reply mapper is JSON-based.
@@ -254,7 +254,9 @@ impl McpServer {
                         Some(value) => match value.into_json() {
                             Ok(json) => json,
                             Err(e) => {
-                                return CallToolResult::error(vec![Content::text(e.to_string())]);
+                                return CallToolResult::error(vec![ContentBlock::text(
+                                    e.to_string(),
+                                )]);
                             }
                         },
                         None => serde_json::Value::Null,
@@ -264,19 +266,19 @@ impl McpServer {
                     let propagated = propagated_headers(&message);
                     match mapper.from_invocation_result(&wit_result, propagated) {
                         Ok(m) => m,
-                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                        Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
                     }
                 }
                 ResolvedToolTarget::Channel { channel } => {
                     let Some(publisher) = &self.publisher else {
-                        return CallToolResult::error(vec![Content::text(
+                        return CallToolResult::error(vec![ContentBlock::text(
                             "Channel-backed tools require messaging support".to_string(),
                         )]);
                     };
                     let return_address = match publisher.publish_request(channel, message).await {
                         Ok(ra) => ra,
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(format!(
+                            return CallToolResult::error(vec![ContentBlock::text(format!(
                                 "Failed to publish to channel '{channel}': {e}"
                             ))]);
                         }
@@ -284,7 +286,7 @@ impl McpServer {
                     match return_address.take().await {
                         Ok(reply) => reply,
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(format!(
+                            return CallToolResult::error(vec![ContentBlock::text(format!(
                                 "Failed to receive reply for request to channel '{channel}': {e}"
                             ))]);
                         }
@@ -318,12 +320,12 @@ impl McpServer {
         component_name: &str,
         resolved: &ResolvedTool,
         arguments: &JsonObject,
-        meta: Option<&Meta>,
+        meta: Option<&MetaObject>,
     ) -> CallToolResult {
         let arguments = match serde_json::to_string(arguments) {
             Ok(text) => text,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "failed to serialize MCP arguments: {e}"
                 ))]);
             }
@@ -347,13 +349,13 @@ impl McpServer {
         let returned = match returned {
             Ok(Some(value)) => value,
             Ok(None) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "{component_name}: {} returned nothing",
                     TOOL_CALL,
                 ))]);
             }
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "{component_name}: {e}"
                 ))]);
             }
@@ -361,7 +363,7 @@ impl McpServer {
         let returned = match returned.into_json() {
             Ok(json) => json,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "{component_name}: {e}"
                 ))]);
             }
@@ -369,7 +371,7 @@ impl McpServer {
         let result = match tools::call_tool_result(&returned) {
             Ok(result) => result,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "{component_name}: {e}"
                 ))]);
             }
@@ -388,7 +390,7 @@ impl McpServer {
 // Non-string `_meta` values are skipped with a warning since a `meta-entry` is
 // a pair of strings.
 fn request_meta_entries(
-    meta: Option<&Meta>,
+    meta: Option<&MetaObject>,
     propagate_request_meta: &[PropagatedHeader],
 ) -> Vec<(String, String)> {
     let mut entries: Vec<(String, String)> = PROPAGATION_CONTEXT
@@ -439,7 +441,7 @@ fn validate_structured_content(
         && let Err(error) = validator.validate(structured)
     {
         return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
+            CallToolResult::error(vec![ContentBlock::text(format!(
                 "tool result does not conform to output-schema: {error}"
             ))]),
             emitted,
@@ -452,9 +454,9 @@ fn validate_structured_content(
 
 // The `_meta` to include with a result.
 fn result_meta(
-    returned: Option<&Meta>,
+    returned: Option<&MetaObject>,
     propagate_result_meta: &[PropagatedHeader],
-) -> Option<Meta> {
+) -> Option<MetaObject> {
     let returned = returned?;
     let mut map = serde_json::Map::new();
     for entry in propagate_result_meta {
@@ -462,7 +464,7 @@ fn result_meta(
             map.insert(entry.target().to_string(), value.clone());
         }
     }
-    (!map.is_empty()).then_some(Meta(map))
+    (!map.is_empty()).then_some(MetaObject(map))
 }
 
 // Extract PROPAGATED_HEADERS from a Message into a HashMap.
@@ -490,7 +492,7 @@ fn propagated_headers(msg: &Message) -> HashMap<String, String> {
 // build site.
 fn build_message_from_mcp_call(
     arguments: &JsonObject,
-    meta: Option<&Meta>,
+    meta: Option<&MetaObject>,
     propagate_request_meta: &[PropagatedHeader],
 ) -> Result<Message, String> {
     let body = serde_json::to_vec(arguments)
@@ -559,7 +561,7 @@ fn build_mcp_result_from_message(
     let result_meta = if result_meta_map.is_empty() {
         None
     } else {
-        Some(rmcp::model::Meta(result_meta_map))
+        Some(MetaObject(result_meta_map))
     };
 
     let parsed: serde_json::Value = if msg.body().is_empty() {
@@ -569,7 +571,7 @@ fn build_mcp_result_from_message(
             Ok(v) => v,
             Err(e) => {
                 return apply_meta(
-                    CallToolResult::error(vec![Content::text(format!(
+                    CallToolResult::error(vec![ContentBlock::text(format!(
                         "reply body is not valid JSON: {e}"
                     ))]),
                     result_meta,
@@ -584,7 +586,7 @@ fn build_mcp_result_from_message(
             other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
         };
         return apply_meta(
-            CallToolResult::success(vec![Content::text(text)]),
+            CallToolResult::success(vec![ContentBlock::text(text)]),
             result_meta,
         );
     };
@@ -613,7 +615,7 @@ fn build_mcp_result_from_message(
 
     if let Err(e) = schema::coerce_value(&mut wrapped, &schema_value) {
         return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
+            CallToolResult::error(vec![ContentBlock::text(format!(
                 "failed to coerce reply body to output-schema: {e}"
             ))]),
             result_meta,
@@ -624,7 +626,7 @@ fn build_mcp_result_from_message(
         && let Err(error) = validator.validate(&wrapped)
     {
         return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
+            CallToolResult::error(vec![ContentBlock::text(format!(
                 "reply body does not conform to output-schema: {error}"
             ))]),
             result_meta,
@@ -635,7 +637,7 @@ fn build_mcp_result_from_message(
 }
 
 // Attach the optional Meta to a CallToolResult.
-fn apply_meta(mut result: CallToolResult, meta: Option<rmcp::model::Meta>) -> CallToolResult {
+fn apply_meta(mut result: CallToolResult, meta: Option<MetaObject>) -> CallToolResult {
     if meta.is_some() {
         result.meta = meta;
     }
@@ -685,7 +687,7 @@ impl ServerHandler for McpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let tool_name = &request.name;
         let arguments = request.arguments.unwrap_or_default();
 
@@ -694,7 +696,7 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
 
         let mut attrs = vec![
@@ -722,7 +724,7 @@ impl ServerHandler for McpServer {
             span.end();
         }
 
-        Ok(result)
+        Ok(result.into())
     }
 
     async fn initialize(
@@ -733,7 +735,7 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
         let span_ctx = self.start_mcp_span("initialize", None, request_attributes(&context), meta);
 
@@ -757,16 +759,12 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
         let span_ctx = self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
 
         let tools = self.tools.values().map(|r| r.tool.clone()).collect();
-        let result = ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        };
+        let result = ListToolsResult::with_all_items(tools);
 
         if let Some((mut span, _)) = span_ctx {
             span.end();
@@ -775,8 +773,8 @@ impl ServerHandler for McpServer {
         Ok(result)
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 rmcp::model::Implementation::new(
                     "composable-mcp-server",
@@ -834,7 +832,7 @@ mod tests {
     use super::*;
     use crate::mapper::McpMapper;
     use composable_runtime::Runtime;
-    use rmcp::model::ClientInfo;
+    use rmcp::model::ClientConfig;
     use rmcp::{ClientHandler, ServiceExt};
     use std::io::Write as _;
     use tempfile::Builder;
@@ -845,8 +843,8 @@ mod tests {
         };
     }
 
-    fn meta(value: serde_json::Value) -> Meta {
-        Meta(value.as_object().unwrap().clone())
+    fn meta(value: serde_json::Value) -> MetaObject {
+        MetaObject(value.as_object().unwrap().clone())
     }
 
     #[test]
@@ -1261,8 +1259,8 @@ mod tests {
     struct TestClientHandler;
 
     impl ClientHandler for TestClientHandler {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            ClientConfig::default()
         }
     }
 
