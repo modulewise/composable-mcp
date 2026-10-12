@@ -281,9 +281,8 @@ impl McpServer {
                             "Channel-backed tools require messaging support",
                         ));
                     };
-                    // The channel and its subscriber are the tool's backend:
-                    // failing to reach them is a tool execution error, which
-                    // may succeed on a retry.
+                    // Failing to reach the channel and its subscriber is a
+                    // tool execution error, which may succeed on a retry.
                     let return_address = match publisher.publish_request(channel, message).await {
                         Ok(return_address) => return_address,
                         Err(e) => {
@@ -1234,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn propagate_result_meta_attaches_on_error_path() {
+    fn propagate_result_meta_attaches_to_a_server_reported_error() {
         // Even when the result is an error, propagate-result-meta entries
         // should still be emitted on the result's _meta.
         let headers = HashMap::from([("x-trace".to_string(), "abc".to_string())]);
