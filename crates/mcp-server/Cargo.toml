@@ -15,9 +15,9 @@ composable-otel = { git = "https://github.com/modulewise/composable-runtime", br
 composable-runtime = { workspace = true, features = ["messaging"] }
 composable-tools = { path = "../.." }
 jsonschema = { version = "0.46", default-features = false }
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry = "0.33"
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic", "http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 rmcp = { version = "3.5", features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
@@ -26,6 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tempfile = "3"
 wat = "1"
-rmcp = { version = "3.5", features = ["client", "server"] }
+rmcp = { version = "3.5", features = ["client", "server", "transport-streamable-http-client-reqwest"] }
