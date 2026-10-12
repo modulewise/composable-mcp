@@ -30,9 +30,9 @@ use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, InitializeRequestParams, InitializeResult,
-        JsonObject, ListToolsResult, Meta, PaginatedRequestParams, ServerCapabilities, ServerInfo,
-        Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        InitializeRequestParams, InitializeResult, JsonObject, ListToolsResult, MetaObject,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -47,8 +47,8 @@ use crate::origin::{OriginPolicy, validate_origin};
 use crate::service::{ResolvedTool, ResolvedToolTarget};
 use crate::tools;
 use composable_runtime::{
-    ComponentHost, Message, MessageBuilder, MessageHeaders, MessagePublisher, PROPAGATED_HEADERS,
-    PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, Val, schema,
+    ComponentError, ComponentHost, Message, MessageBuilder, MessageHeaders, MessagePublisher,
+    PROPAGATED_HEADERS, PROPAGATION_CONTEXT, PropagatedHeader, PropagationContext, Val, schema,
 };
 use composable_tools::{TOOL_CALL, meta_entries};
 
@@ -129,7 +129,7 @@ impl McpServer {
         method: &str,
         target: Option<&str>,
         mut attributes: Vec<KeyValue>,
-        meta: Option<&Meta>,
+        meta: Option<&MetaObject>,
     ) -> Option<(opentelemetry_sdk::trace::Span, HashMap<String, String>)> {
         let tp = self.tracer_provider.as_ref()?;
         let tracer = tp.tracer("modulewise.composable.mcp.server");
@@ -186,20 +186,24 @@ impl McpServer {
         &self,
         tool_name: &str,
         arguments: &JsonObject,
-        meta: Option<&Meta>,
+        meta: Option<&MetaObject>,
         context: Option<HashMap<String, String>>,
-    ) -> CallToolResult {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let Some(resolved) = self.tools.get(tool_name) else {
-            return CallToolResult::error(vec![Content::text(format!(
-                "Tool not found: {tool_name}"
-            ))]);
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Unknown tool: {tool_name}"),
+                None,
+            ));
         };
 
+        // Input validation errors are tool execution errors, which the
+        // model can correct.
         let args_value = serde_json::Value::Object(arguments.clone());
         if let Err(error) = resolved.input_validator.validate(&args_value) {
-            return CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Invalid arguments for tool '{tool_name}': {error}"
-            ))]);
+            ))])
+            .into());
         }
 
         // Build the inbound Message:
@@ -215,13 +219,16 @@ impl McpServer {
                     .await;
             }
 
-            let message = match build_message_from_mcp_call(
-                arguments,
-                meta,
-                &resolved.propagate_request_meta,
-            ) {
-                Ok(m) => m,
-                Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+            let message =
+                build_message_from_mcp_call(arguments, meta, &resolved.propagate_request_meta)
+                    .map_err(server_error)?;
+
+            // Propagation entries (PROPAGATED_HEADERS) read from the inbound
+            // Message carry over to the reply Message. A tool execution error
+            // includes the same entries a successful reply would.
+            let propagated = propagated_headers(&message);
+            let execution_error = |text: String| -> Result<CallToolResponse, rmcp::ErrorData> {
+                Ok(tool_execution_error(text, &propagated, &resolved.propagate_result_meta).into())
             };
 
             let reply = match &resolved.target {
@@ -230,9 +237,12 @@ impl McpServer {
                     component_name,
                     mapper,
                 } => {
+                    // Arguments that pass the input schema can still fail
+                    // conversion to the function's WIT types, which the
+                    // model can correct.
                     let invocation = match mapper.to_invocation(&message) {
-                        Ok(inv) => inv,
-                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                        Ok(invocation) => invocation,
+                        Err(e) => return execution_error(e),
                     };
                     let wit_result = match self
                         .component_host
@@ -245,48 +255,48 @@ impl McpServer {
                         .await
                     {
                         Ok(v) => v,
+                        // The function's `err` is a tool execution error.
+                        // Anything else is a server error.
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(e.to_string())]);
+                            return match e.downcast::<ComponentError>() {
+                                Ok(error) => execution_error(error_text(&error)),
+                                Err(e) => Err(server_error(e.to_string())),
+                            };
                         }
                     };
                     // The reply mapper is JSON-based.
                     let wit_result = match wit_result {
-                        Some(value) => match value.into_json() {
-                            Ok(json) => json,
-                            Err(e) => {
-                                return CallToolResult::error(vec![Content::text(e.to_string())]);
-                            }
-                        },
+                        Some(value) => {
+                            value.into_json().map_err(|e| server_error(e.to_string()))?
+                        }
                         None => serde_json::Value::Null,
                     };
-                    // Propagation entries (PROPAGATED_HEADERS) read from the
-                    // inbound Message carry into the reply Message.
-                    let propagated = propagated_headers(&message);
-                    match mapper.from_invocation_result(&wit_result, propagated) {
-                        Ok(m) => m,
-                        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
-                    }
+                    mapper
+                        .from_invocation_result(&wit_result, propagated.clone())
+                        .map_err(server_error)?
                 }
                 ResolvedToolTarget::Channel { channel } => {
                     let Some(publisher) = &self.publisher else {
-                        return CallToolResult::error(vec![Content::text(
-                            "Channel-backed tools require messaging support".to_string(),
-                        )]);
+                        return Err(server_error(
+                            "Channel-backed tools require messaging support",
+                        ));
                     };
+                    // Failing to reach the channel and its subscriber is a
+                    // tool execution error, which may succeed on a retry.
                     let return_address = match publisher.publish_request(channel, message).await {
-                        Ok(ra) => ra,
+                        Ok(return_address) => return_address,
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(format!(
+                            return execution_error(format!(
                                 "Failed to publish to channel '{channel}': {e}"
-                            ))]);
+                            ));
                         }
                     };
                     match return_address.take().await {
                         Ok(reply) => reply,
                         Err(e) => {
-                            return CallToolResult::error(vec![Content::text(format!(
+                            return execution_error(format!(
                                 "Failed to receive reply for request to channel '{channel}': {e}"
-                            ))]);
+                            ));
                         }
                     }
                 }
@@ -298,6 +308,7 @@ impl McpServer {
                 &resolved.output_validator,
                 &resolved.propagate_result_meta,
             )
+            .map(Into::into)
         };
 
         // Establish the propagation scope around dispatch so any Message
@@ -318,16 +329,10 @@ impl McpServer {
         component_name: &str,
         resolved: &ResolvedTool,
         arguments: &JsonObject,
-        meta: Option<&Meta>,
-    ) -> CallToolResult {
-        let arguments = match serde_json::to_string(arguments) {
-            Ok(text) => text,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "failed to serialize MCP arguments: {e}"
-                ))]);
-            }
-        };
+        meta: Option<&MetaObject>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let arguments = serde_json::to_string(arguments)
+            .map_err(|e| server_error(format!("failed to serialize MCP arguments: {e}")))?;
 
         let entries = request_meta_entries(meta, &resolved.propagate_request_meta);
 
@@ -344,42 +349,39 @@ impl McpServer {
             )
             .await;
 
+        // A `tool-error` is the JSON-RPC error the tool reports. Anything that
+        // breaks the `composable:tools/tool` contract is a server error.
         let returned = match returned {
             Ok(Some(value)) => value,
             Ok(None) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{component_name}: {} returned nothing",
-                    TOOL_CALL,
-                ))]);
+                return Err(server_error(format!(
+                    "{component_name}: {TOOL_CALL} returned nothing"
+                )));
             }
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{component_name}: {e}"
-                ))]);
+                return Err(match e.downcast::<ComponentError>() {
+                    Ok(ComponentError {
+                        value: Some(Val::Json(error)),
+                    }) => tools::tool_error(&error).unwrap_or_else(|e| {
+                        server_error(format!("{component_name}: invalid tool-error: {e}"))
+                    }),
+                    Ok(error) => server_error(format!("{component_name}: {error}")),
+                    Err(e) => server_error(format!("{component_name}: {e}")),
+                });
             }
         };
-        let returned = match returned.into_json() {
-            Ok(json) => json,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{component_name}: {e}"
-                ))]);
-            }
-        };
-        let result = match tools::call_tool_result(&returned) {
-            Ok(result) => result,
-            Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{component_name}: {e}"
-                ))]);
-            }
-        };
+        let returned = returned
+            .into_json()
+            .map_err(|e| server_error(format!("{component_name}: {e}")))?;
+        let result = tools::call_tool_result(&returned)
+            .map_err(|e| server_error(format!("{component_name}: {e}")))?;
 
         validate_structured_content(
             result,
             &resolved.output_validator,
             &resolved.propagate_result_meta,
         )
+        .map(Into::into)
     }
 }
 
@@ -388,7 +390,7 @@ impl McpServer {
 // Non-string `_meta` values are skipped with a warning since a `meta-entry` is
 // a pair of strings.
 fn request_meta_entries(
-    meta: Option<&Meta>,
+    meta: Option<&MetaObject>,
     propagate_request_meta: &[PropagatedHeader],
 ) -> Vec<(String, String)> {
     let mut entries: Vec<(String, String)> = PROPAGATION_CONTEXT
@@ -426,35 +428,107 @@ fn request_meta_entries(
 }
 
 // Ensure a tool's structured content conforms to its advertised output schema,
-// and select which `_meta` entries to include with the result.
+// and select which `_meta` entries to include with the result. A result that
+// does not conform is a server error.
 fn validate_structured_content(
     mut result: CallToolResult,
     output_validator: &Option<jsonschema::Validator>,
     propagate_result_meta: &[PropagatedHeader],
-) -> CallToolResult {
-    let emitted = result_meta(result.meta.as_ref(), propagate_result_meta);
-
+) -> Result<CallToolResult, rmcp::ErrorData> {
     if let Some(validator) = output_validator
         && let Some(structured) = result.structured_content.as_ref()
         && let Err(error) = validator.validate(structured)
     {
-        return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
-                "tool result does not conform to output-schema: {error}"
-            ))]),
-            emitted,
-        );
+        return Err(server_error(format!(
+            "tool result does not conform to output-schema: {error}"
+        )));
     }
 
+    let emitted = result_meta(result.meta.as_ref(), propagate_result_meta);
     result.meta = None;
-    apply_meta(result, emitted)
+    Ok(apply_meta(result, emitted))
+}
+
+// A server error, reported as the JSON-RPC internal error.
+fn server_error(message: impl Into<String>) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(message.into(), None)
+}
+
+// An `isError` result for a tool execution error, with the `_meta` entries
+// propagate-result-meta selects from the given headers.
+fn tool_execution_error(
+    text: String,
+    headers: &HashMap<String, String>,
+    propagate_result_meta: &[PropagatedHeader],
+) -> CallToolResult {
+    apply_meta(
+        CallToolResult::error(vec![ContentBlock::text(text)]),
+        selected_result_meta(|name| headers.get(name).cloned(), propagate_result_meta),
+    )
+}
+
+// Whether a session's negotiated protocol version predates 2026-07-28, the
+// first to admit any JSON Schema as an output schema and any JSON value as
+// structured content. Earlier versions require both to be objects.
+fn is_legacy(protocol_version: Option<ProtocolVersion>) -> bool {
+    !protocol_version.is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
+}
+
+// A tool within a legacy session. If its root is not `type: "object"`, its
+// output schema will be omitted.
+fn legacy_tool(mut tool: Tool) -> Tool {
+    if tool
+        .output_schema
+        .as_ref()
+        .is_some_and(|schema| schema.get("type").and_then(|t| t.as_str()) != Some("object"))
+    {
+        tool.output_schema = None;
+    }
+    tool
+}
+
+// A result as returned within a legacy session. If not an object, structured
+// content is omitted, leaving the content blocks that carry it as text.
+fn legacy_result(mut result: CallToolResult) -> CallToolResult {
+    if result
+        .structured_content
+        .as_ref()
+        .is_some_and(|value| !value.is_object())
+    {
+        result.structured_content = None;
+    }
+    result
+}
+
+// The `_meta` entries propagate-result-meta selects from a set of headers,
+// each keyed by its target name.
+fn selected_result_meta(
+    header: impl Fn(&str) -> Option<String>,
+    propagate_result_meta: &[PropagatedHeader],
+) -> Option<MetaObject> {
+    let mut map = serde_json::Map::new();
+    for entry in propagate_result_meta {
+        if let Some(value) = header(entry.source()) {
+            map.insert(entry.target().to_string(), serde_json::Value::String(value));
+        }
+    }
+    (!map.is_empty()).then_some(MetaObject(map))
+}
+
+// The text of an `isError` result for a function's WIT `err` value.
+fn error_text(error: &ComponentError) -> String {
+    match &error.value {
+        Some(Val::Json(serde_json::Value::String(text))) => text.clone(),
+        Some(Val::Json(value)) => value.to_string(),
+        _ => error.to_string(),
+    }
 }
 
 // The `_meta` to include with a result.
 fn result_meta(
-    returned: Option<&Meta>,
+    returned: Option<&MetaObject>,
     propagate_result_meta: &[PropagatedHeader],
-) -> Option<Meta> {
+) -> Option<MetaObject> {
     let returned = returned?;
     let mut map = serde_json::Map::new();
     for entry in propagate_result_meta {
@@ -462,7 +536,7 @@ fn result_meta(
             map.insert(entry.target().to_string(), value.clone());
         }
     }
-    (!map.is_empty()).then_some(Meta(map))
+    (!map.is_empty()).then_some(MetaObject(map))
 }
 
 // Extract PROPAGATED_HEADERS from a Message into a HashMap.
@@ -490,7 +564,7 @@ fn propagated_headers(msg: &Message) -> HashMap<String, String> {
 // build site.
 fn build_message_from_mcp_call(
     arguments: &JsonObject,
-    meta: Option<&Meta>,
+    meta: Option<&MetaObject>,
     propagate_request_meta: &[PropagatedHeader],
 ) -> Result<Message, String> {
     let body = serde_json::to_vec(arguments)
@@ -535,47 +609,34 @@ fn build_message_from_mcp_call(
 //   provided `output_validator` if present, and return a structured success
 //   result. When the output schema is a single `array`-typed or `oneOf`
 //   property, the body value is wrapped under that property name.
+// - A body that is not JSON, cannot be coerced, or does not conform to the
+//   output schema is a server error.
 //
 // `result<T, E>` to `isError` mapping is NOT handled here. The runtime's
-// `invoke` already returns `Err` for the WIT `err` arm; that surfaces in
-// the caller as a dispatch-level error, not as a payload to this helper.
+// `invoke` returns a WIT `err` as a `ComponentError`, which the caller reports
+// as an `isError` result before any reply Message exists.
 fn build_mcp_result_from_message(
     msg: Message,
     tool: &Tool,
     output_validator: &Option<jsonschema::Validator>,
     propagate_result_meta: &[PropagatedHeader],
-) -> CallToolResult {
-    // Compute the _meta entries to emit on the result, reading source Message
-    // headers and writing them under the entry's target name.
-    let mut result_meta_map = serde_json::Map::new();
-    for entry in propagate_result_meta {
-        if let Some(val) = msg.headers().get::<&str>(entry.source()) {
-            result_meta_map.insert(
-                entry.target().to_string(),
-                serde_json::Value::String(val.to_string()),
-            );
-        }
-    }
-    let result_meta = if result_meta_map.is_empty() {
-        None
-    } else {
-        Some(rmcp::model::Meta(result_meta_map))
-    };
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    // The _meta entries to emit on the result, read from the reply Message's
+    // headers.
+    let result_meta = selected_result_meta(
+        |name| {
+            msg.headers()
+                .get::<&str>(name)
+                .map(|value| value.to_string())
+        },
+        propagate_result_meta,
+    );
 
     let parsed: serde_json::Value = if msg.body().is_empty() {
         serde_json::Value::Null
     } else {
-        match serde_json::from_slice(msg.body()) {
-            Ok(v) => v,
-            Err(e) => {
-                return apply_meta(
-                    CallToolResult::error(vec![Content::text(format!(
-                        "reply body is not valid JSON: {e}"
-                    ))]),
-                    result_meta,
-                );
-            }
-        }
+        serde_json::from_slice(msg.body())
+            .map_err(|e| server_error(format!("reply body is not valid JSON: {e}")))?
     };
 
     let Some(schema) = tool.output_schema.as_ref() else {
@@ -583,10 +644,10 @@ fn build_mcp_result_from_message(
             serde_json::Value::String(s) => s.clone(),
             other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
         };
-        return apply_meta(
-            CallToolResult::success(vec![Content::text(text)]),
+        return Ok(apply_meta(
+            CallToolResult::success(vec![ContentBlock::text(text)]),
             result_meta,
-        );
+        ));
     };
 
     let schema_value = serde_json::Value::Object((**schema).clone());
@@ -611,31 +672,22 @@ fn build_mcp_result_from_message(
         parsed
     };
 
-    if let Err(e) = schema::coerce_value(&mut wrapped, &schema_value) {
-        return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
-                "failed to coerce reply body to output-schema: {e}"
-            ))]),
-            result_meta,
-        );
-    }
+    schema::coerce_value(&mut wrapped, &schema_value)
+        .map_err(|e| server_error(format!("failed to coerce reply body to output-schema: {e}")))?;
 
     if let Some(validator) = output_validator
         && let Err(error) = validator.validate(&wrapped)
     {
-        return apply_meta(
-            CallToolResult::error(vec![Content::text(format!(
-                "reply body does not conform to output-schema: {error}"
-            ))]),
-            result_meta,
-        );
+        return Err(server_error(format!(
+            "reply body does not conform to output-schema: {error}"
+        )));
     }
 
-    apply_meta(CallToolResult::structured(wrapped), result_meta)
+    Ok(apply_meta(CallToolResult::structured(wrapped), result_meta))
 }
 
 // Attach the optional Meta to a CallToolResult.
-fn apply_meta(mut result: CallToolResult, meta: Option<rmcp::model::Meta>) -> CallToolResult {
+fn apply_meta(mut result: CallToolResult, meta: Option<MetaObject>) -> CallToolResult {
     if meta.is_some() {
         result.meta = meta;
     }
@@ -685,7 +737,7 @@ impl ServerHandler for McpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let tool_name = &request.name;
         let arguments = request.arguments.unwrap_or_default();
 
@@ -694,7 +746,7 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
 
         let mut attrs = vec![
@@ -705,6 +757,7 @@ impl ServerHandler for McpServer {
 
         let span_ctx = self.start_mcp_span("tools/call", Some(tool_name), attrs, meta);
 
+        let legacy = is_legacy(context.protocol_version());
         let context = span_ctx.as_ref().map(|(_, ctx)| ctx.clone());
 
         let (mut span, result) = {
@@ -715,14 +768,26 @@ impl ServerHandler for McpServer {
         };
 
         if let Some(ref mut span) = span {
-            if result.is_error.unwrap_or(false) {
-                span.set_status(Status::error(""));
-                span.set_attribute(KeyValue::new("error.type", "tool_error"));
+            match &result {
+                Ok(CallToolResponse::Complete(complete)) if complete.is_error.unwrap_or(false) => {
+                    span.set_status(Status::error(""));
+                    span.set_attribute(KeyValue::new("error.type", "tool_error"));
+                }
+                Err(error) => {
+                    span.set_status(Status::error(error.message.to_string()));
+                    span.set_attribute(KeyValue::new("error.type", error.code.0.to_string()));
+                }
+                _ => {}
             }
             span.end();
         }
 
-        Ok(result)
+        match result {
+            Ok(CallToolResponse::Complete(complete)) if legacy => {
+                Ok(legacy_result(complete).into())
+            }
+            other => other,
+        }
     }
 
     async fn initialize(
@@ -733,7 +798,7 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
         let span_ctx = self.start_mcp_span("initialize", None, request_attributes(&context), meta);
 
@@ -757,16 +822,18 @@ impl ServerHandler for McpServer {
         let meta = if context.meta.0.is_empty() {
             None
         } else {
-            Some(&context.meta)
+            Some(&context.meta.0)
         };
         let span_ctx = self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
 
-        let tools = self.tools.values().map(|r| r.tool.clone()).collect();
-        let result = ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        };
+        let legacy = is_legacy(context.protocol_version());
+        let tools = self
+            .tools
+            .values()
+            .map(|r| r.tool.clone())
+            .map(|tool| if legacy { legacy_tool(tool) } else { tool })
+            .collect();
+        let result = ListToolsResult::with_all_items(tools);
 
         if let Some((mut span, _)) = span_ctx {
             span.end();
@@ -775,8 +842,8 @@ impl ServerHandler for McpServer {
         Ok(result)
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 rmcp::model::Implementation::new(
                     "composable-mcp-server",
@@ -834,8 +901,8 @@ mod tests {
     use super::*;
     use crate::mapper::McpMapper;
     use composable_runtime::Runtime;
-    use rmcp::model::ClientInfo;
-    use rmcp::{ClientHandler, ServiceExt};
+    use rmcp::model::ClientConfig;
+    use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
     use std::io::Write as _;
     use tempfile::Builder;
 
@@ -845,8 +912,8 @@ mod tests {
         };
     }
 
-    fn meta(value: serde_json::Value) -> Meta {
-        Meta(value.as_object().unwrap().clone())
+    fn meta(value: serde_json::Value) -> MetaObject {
+        MetaObject(value.as_object().unwrap().clone())
     }
 
     #[test]
@@ -942,7 +1009,7 @@ mod tests {
     fn build_result_no_schema_returns_text() {
         let tool = tool_with_output_schema(None);
         let msg = reply_msg(serde_json::json!({ "value": 42 }));
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]).unwrap();
         assert!(!r.is_error.unwrap_or(false));
         let text = r.content[0].as_text().unwrap().text.clone();
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -953,7 +1020,7 @@ mod tests {
     fn build_result_no_schema_returns_string_body_raw() {
         let tool = tool_with_output_schema(None);
         let msg = reply_msg(serde_json::json!("hello, world"));
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]).unwrap();
         let text = r.content[0].as_text().unwrap().text.clone();
         // A JSON string body returns the raw string, not JSON-quoted.
         assert_eq!(text, "hello, world");
@@ -968,7 +1035,7 @@ mod tests {
         });
         let tool = tool_with_output_schema(Some(schema));
         let msg = reply_msg(serde_json::json!({ "name": "Alice" }));
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]).unwrap();
         assert!(!r.is_error.unwrap_or(false));
         let structured = r.structured_content.unwrap();
         assert_eq!(structured, serde_json::json!({ "name": "Alice" }));
@@ -990,7 +1057,7 @@ mod tests {
             "name": "Alice",
             "kv": { "k": 1 }
         }));
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &[]).unwrap();
         assert!(!r.is_error.unwrap_or(false));
         let structured = r.structured_content.unwrap();
         assert_eq!(structured["name"], serde_json::json!("Alice"));
@@ -1020,7 +1087,7 @@ mod tests {
         let tool = tool_with_output_schema(Some(schema));
         let body = serde_json::json!("hello");
         let msg = reply_msg(body.clone());
-        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]).unwrap();
         assert!(
             !r.is_error.unwrap_or(false),
             "expected success, got error: {:?}",
@@ -1050,7 +1117,7 @@ mod tests {
         let tool = tool_with_output_schema(Some(schema));
         let body = serde_json::json!([{ "name": "Alice" }, { "name": "Bob" }]);
         let msg = reply_msg(body.clone());
-        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]).unwrap();
         assert!(
             !r.is_error.unwrap_or(false),
             "expected success, got error: {:?}",
@@ -1073,12 +1140,12 @@ mod tests {
         let tool = tool_with_output_schema(Some(schema));
         // Body lacks the required `name` property.
         let msg = reply_msg(serde_json::json!({ "wrong": "field" }));
-        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
-        assert!(r.is_error.unwrap_or(false));
-        let text = r.content[0].as_text().unwrap().text.clone();
+        let error = build_mcp_result_from_message(msg, &tool, &validator, &[]).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert!(
-            text.contains("does not conform to output-schema"),
-            "unexpected error text: {text}"
+            error.message.contains("does not conform to output-schema"),
+            "unexpected error message: {}",
+            error.message
         );
     }
 
@@ -1092,7 +1159,7 @@ mod tests {
         let validator = Some(jsonschema::validator_for(&schema).unwrap());
         let tool = tool_with_output_schema(Some(schema));
         let msg = reply_msg(serde_json::json!({ "name": "Alice" }));
-        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]);
+        let r = build_mcp_result_from_message(msg, &tool, &validator, &[]).unwrap();
         assert!(!r.is_error.unwrap_or(false));
     }
 
@@ -1102,12 +1169,12 @@ mod tests {
         let msg = MessageBuilder::new(b"not json".to_vec())
             .header(MessageHeaders::CONTENT_TYPE, "application/json")
             .build();
-        let r = build_mcp_result_from_message(msg, &tool, &None, &[]);
-        assert!(r.is_error.unwrap_or(false));
-        let text = r.content[0].as_text().unwrap().text.clone();
+        let error = build_mcp_result_from_message(msg, &tool, &None, &[]).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert!(
-            text.contains("reply body is not valid JSON"),
-            "unexpected error text: {text}"
+            error.message.contains("reply body is not valid JSON"),
+            "unexpected error message: {}",
+            error.message
         );
     }
 
@@ -1122,7 +1189,7 @@ mod tests {
             .header("x-ratelimit-remaining", "42")
             .build();
         let propagate = vec![PropagatedHeader::parse("x-ratelimit-remaining").unwrap()];
-        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate).unwrap();
         let meta = r.meta.expect("expected result.meta to be set");
         assert_eq!(
             meta.0.get("x-ratelimit-remaining"),
@@ -1143,7 +1210,7 @@ mod tests {
             )
             .unwrap(),
         ];
-        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate).unwrap();
         let meta = r.meta.expect("expected result.meta to be set");
         assert_eq!(
             meta.0.get("com.example.tools/ratelimit-remaining"),
@@ -1161,21 +1228,17 @@ mod tests {
         // Declared but no matching header on the reply Message; no _meta
         // entry should be emitted (and result.meta should stay None).
         let propagate = vec![PropagatedHeader::parse("x-not-present").unwrap()];
-        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate).unwrap();
         assert!(r.meta.is_none());
     }
 
     #[test]
-    fn build_result_propagate_result_meta_attaches_on_error_path() {
+    fn propagate_result_meta_attaches_to_a_server_reported_error() {
         // Even when the result is an error, propagate-result-meta entries
         // should still be emitted on the result's _meta.
-        let tool = tool_with_output_schema(None);
-        let msg = MessageBuilder::new(b"not json".to_vec())
-            .header(MessageHeaders::CONTENT_TYPE, "application/json")
-            .header("x-trace", "abc")
-            .build();
+        let headers = HashMap::from([("x-trace".to_string(), "abc".to_string())]);
         let propagate = vec![PropagatedHeader::parse("x-trace").unwrap()];
-        let r = build_mcp_result_from_message(msg, &tool, &None, &propagate);
+        let r = tool_execution_error("the tool failed".to_string(), &headers, &propagate);
         assert!(r.is_error.unwrap_or(false));
         let meta = r
             .meta
@@ -1184,6 +1247,69 @@ mod tests {
             meta.0.get("x-trace"),
             Some(&serde_json::Value::String("abc".to_string()))
         );
+    }
+
+    #[test]
+    fn error_text_is_a_string_err_value_itself() {
+        let error = ComponentError {
+            value: Some(Val::Json(serde_json::json!("out of stock"))),
+        };
+        assert_eq!(error_text(&error), "out of stock");
+    }
+
+    #[test]
+    fn error_text_is_a_structured_err_value_as_json() {
+        let error = ComponentError {
+            value: Some(Val::Json(serde_json::json!({ "code": 7 }))),
+        };
+        assert_eq!(error_text(&error), "{\"code\":7}");
+    }
+
+    #[test]
+    fn error_text_without_an_err_value_describes_the_error() {
+        let error = ComponentError { value: None };
+        assert_eq!(error_text(&error), "Component returned error");
+    }
+
+    #[test]
+    fn non_conformant_structured_content_is_a_server_error() {
+        // The server must not return structured content that does not
+        // conform to the tool's output schema.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let validator = Some(jsonschema::validator_for(&schema).unwrap());
+        let returned = CallToolResult::structured(serde_json::json!({ "wrong": "field" }));
+        let error = validate_structured_content(returned, &validator, &[]).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(
+            error.message.contains("does not conform to output-schema"),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn propagate_result_meta_attaches_to_a_tool_reported_error() {
+        // A tool component reporting failure through `is-error` still gets
+        // the propagate-result-meta entries from the `meta` it returned.
+        let mut returned = CallToolResult::error(vec![ContentBlock::text("the tool failed")]);
+        returned.meta = Some(meta(
+            serde_json::json!({ "x-trace": "abc", "x-other": "1" }),
+        ));
+        let propagate = vec![PropagatedHeader::parse("x-trace").unwrap()];
+        let r = validate_structured_content(returned, &None, &propagate).unwrap();
+        assert!(r.is_error.unwrap_or(false));
+        let meta = r
+            .meta
+            .expect("expected result.meta to be set even on error");
+        assert_eq!(
+            meta.0.get("x-trace"),
+            Some(&serde_json::Value::String("abc".to_string()))
+        );
+        assert!(meta.0.get("x-other").is_none());
     }
 
     fn create_wasm(wat_content: &str) -> tempfile::NamedTempFile {
@@ -1211,8 +1337,73 @@ mod tests {
         "#
     }
 
+    // `check(x: s32) -> result<s32, string>`: `x` when it is not negative,
+    // otherwise the `err` "x must not be negative". The result is written at
+    // offset 0: the discriminant byte, then the payload at offset 4 (an s32,
+    // or a string's pointer and length).
+    fn check_wat() -> &'static str {
+        r#"
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (data (i32.const 64) "x must not be negative")
+                (func $check (param i32) (result i32)
+                    (if (i32.lt_s (local.get 0) (i32.const 0))
+                        (then
+                            (i32.store8 (i32.const 0) (i32.const 1))
+                            (i32.store (i32.const 4) (i32.const 64))
+                            (i32.store (i32.const 8) (i32.const 22)))
+                        (else
+                            (i32.store8 (i32.const 0) (i32.const 0))
+                            (i32.store (i32.const 4) (local.get 0))))
+                    (i32.const 0)
+                )
+                (export "check" (func $check))
+            )
+            (core instance $i (instantiate $m))
+            (alias core export $i "memory" (core memory $mem))
+            (func $f (param "x" s32) (result (result s32 (error string)))
+                (canon lift (core func $i "check") (memory $mem)))
+            (export "check" (func $f))
+        )
+        "#
+    }
+
+    // `fail(x: s32) -> s32`, which traps.
+    fn trap_wat() -> &'static str {
+        r#"
+        (component
+            (core module $m
+                (func $fail (param i32) (result i32)
+                    unreachable
+                )
+                (export "fail" (func $fail))
+            )
+            (core instance $i (instantiate $m))
+            (func $f (param "x" s32) (result s32) (canon lift (core func $i "fail")))
+            (export "fail" (func $f))
+        )
+        "#
+    }
+
     // Build an McpServer from a Runtime by auto-discovering all components.
     fn build_test_server(runtime: &Runtime) -> McpServer {
+        build_test_server_with(
+            runtime,
+            composable_runtime::MappingConfig::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    // Build an McpServer from a Runtime by auto-discovering all components,
+    // giving every tool the same mapping and `_meta` propagation.
+    fn build_test_server_with(
+        runtime: &Runtime,
+        mapping: composable_runtime::MappingConfig,
+        propagate_request_meta: Vec<PropagatedHeader>,
+        propagate_result_meta: Vec<PropagatedHeader>,
+    ) -> McpServer {
         let component_host = runtime.host();
         let mut tools = HashMap::new();
 
@@ -1225,7 +1416,7 @@ mod tests {
                 let mapper = composable_runtime::MessageMapper::from_component(
                     component,
                     Some(function.key()),
-                    composable_runtime::MappingConfig::default(),
+                    mapping.clone(),
                 )
                 .unwrap();
                 let target = ResolvedToolTarget::Component {
@@ -1239,8 +1430,8 @@ mod tests {
                         input_validator,
                         output_validator: None,
                         target,
-                        propagate_request_meta: Vec::new(),
-                        propagate_result_meta: Vec::new(),
+                        propagate_request_meta: propagate_request_meta.clone(),
+                        propagate_result_meta: propagate_result_meta.clone(),
                     },
                 );
             }
@@ -1257,12 +1448,18 @@ mod tests {
         )
     }
 
+    // A test client, requesting `protocol_version` in `initialize` when set.
     #[derive(Debug, Clone, Default)]
-    struct TestClientHandler;
+    struct TestClientHandler {
+        protocol_version: Option<ProtocolVersion>,
+    }
 
     impl ClientHandler for TestClientHandler {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            match &self.protocol_version {
+                Some(version) => ClientConfig::default().with_protocol_version(version.clone()),
+                None => ClientConfig::default(),
+            }
         }
     }
 
@@ -1290,6 +1487,21 @@ mod tests {
     }
 
     async fn setup_test_client(server_handler: McpServer) -> TestClient {
+        setup_test_client_as(
+            server_handler,
+            TestClientHandler::default(),
+            rmcp::ClientLifecycleMode::Initialize,
+        )
+        .await
+    }
+
+    // A test client opening its session with `lifecycle`: `Initialize` for a
+    // legacy session, `Discover` for a modern one.
+    async fn setup_test_client_as(
+        server_handler: McpServer,
+        client_handler: TestClientHandler,
+        lifecycle: rmcp::ClientLifecycleMode,
+    ) -> TestClient {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
 
         let server_handle = tokio::spawn(async move {
@@ -1301,7 +1513,10 @@ mod tests {
             anyhow::Ok(())
         });
 
-        let client = TestClientHandler.serve(client_transport).await.unwrap();
+        let client = client_handler
+            .serve_with_lifecycle(client_transport, lifecycle)
+            .await
+            .unwrap();
 
         TestClient {
             client: Some(client),
@@ -1383,12 +1598,252 @@ mod tests {
         let runtime = build_runtime(wasm.path()).await;
         let client = setup_test_client(build_test_server(&runtime)).await;
 
+        // An unknown tool is a protocol error, not a tool execution error.
         let request = CallToolRequestParams::new("nonexistent-tool");
-        let result = client.call_tool(request).await.unwrap();
-        assert!(result.is_error.unwrap_or(false));
+        let error = match client.call_tool(request).await {
+            Err(rmcp::service::ServiceError::McpError(error)) => error,
+            other => panic!("expected a JSON-RPC error, got {other:?}"),
+        };
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.message, "Unknown tool: nonexistent-tool");
+    }
 
-        let text = result.content[0].as_text().unwrap().text.as_str();
-        assert!(text.contains("Tool not found"));
-        assert!(text.contains("nonexistent-tool"));
+    // A request carrying `_meta` keys, for tests that propagate them.
+    fn request_with_meta(
+        name: std::borrow::Cow<'static, str>,
+        arguments: JsonObject,
+        meta_value: serde_json::Value,
+    ) -> CallToolRequestParams {
+        let mut request = CallToolRequestParams::new(name).with_arguments(arguments);
+        request.meta = Some(rmcp::model::RequestMetaObject(meta(meta_value)));
+        request
+    }
+
+    #[tokio::test]
+    async fn test_function_err_is_a_tool_execution_error() {
+        // A function's WIT `err` produces an `isError` result with the
+        // propagate-result-meta entries a reply would carry.
+        let wasm = create_wasm(check_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let baggage = vec![PropagatedHeader::parse("baggage").unwrap()];
+        let server = build_test_server_with(
+            &runtime,
+            composable_runtime::MappingConfig::default(),
+            baggage.clone(),
+            baggage,
+        );
+        let client = setup_test_client(server).await;
+        let tool = client.list_tools(None).await.unwrap().tools[0].name.clone();
+
+        let ok = client
+            .call_tool(request_with_meta(
+                tool.clone(),
+                args!({ "x": 3 }),
+                serde_json::json!({ "baggage": "k=v" }),
+            ))
+            .await
+            .unwrap();
+        assert!(!ok.is_error.unwrap_or(false));
+        assert_eq!(ok.content[0].as_text().unwrap().text, "3");
+
+        let err = client
+            .call_tool(request_with_meta(
+                tool,
+                args!({ "x": -1 }),
+                serde_json::json!({ "baggage": "k=v" }),
+            ))
+            .await
+            .unwrap();
+        assert!(err.is_error.unwrap_or(false));
+        assert_eq!(
+            err.content[0].as_text().unwrap().text,
+            "x must not be negative"
+        );
+        let meta = err
+            .meta
+            .expect("expected result.meta on the isError result");
+        assert_eq!(
+            meta.0.get("baggage"),
+            Some(&serde_json::Value::String("k=v".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trap_is_a_server_error() {
+        // A trap is a fault in the component, not something the model can fix.
+        // Produces a JSON-RPC internal error.
+        let wasm = create_wasm(trap_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let client = setup_test_client(build_test_server(&runtime)).await;
+        let tool = client.list_tools(None).await.unwrap().tools[0].name.clone();
+
+        let request = CallToolRequestParams::new(tool).with_arguments(args!({ "x": 1 }));
+        let error = match client.call_tool(request).await {
+            Err(rmcp::service::ServiceError::McpError(error)) => error,
+            other => panic!("expected a JSON-RPC error, got {other:?}"),
+        };
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_argument_mapping_failure_is_a_tool_execution_error() {
+        // Arguments that pass the input schema can still fail mapping to the
+        // function's parameters, e.g. a param-mapping template whose `_meta`
+        // source is missing. That is a tool execution error, which the caller
+        // can correct.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let mapping = composable_runtime::MappingConfig {
+            param_mapping: Some([("x".to_string(), serde_json::json!("{headers.x-value}"))].into()),
+            ..Default::default()
+        };
+        let server = build_test_server_with(
+            &runtime,
+            mapping,
+            vec![PropagatedHeader::parse("x-value").unwrap()],
+            Vec::new(),
+        );
+        let client = setup_test_client(server).await;
+        let tool = client.list_tools(None).await.unwrap().tools[0].name.clone();
+
+        // With the `_meta` source present, the mapping succeeds.
+        let mapped = client
+            .call_tool(request_with_meta(
+                tool.clone(),
+                args!({ "x": 0 }),
+                serde_json::json!({ "x-value": "5" }),
+            ))
+            .await
+            .unwrap();
+        assert!(!mapped.is_error.unwrap_or(false));
+        assert_eq!(mapped.content[0].as_text().unwrap().text, "7");
+
+        let unmapped = client
+            .call_tool(CallToolRequestParams::new(tool).with_arguments(args!({ "x": 0 })))
+            .await
+            .unwrap();
+        assert!(unmapped.is_error.unwrap_or(false));
+        let text = unmapped.content[0].as_text().unwrap().text.as_str();
+        assert!(
+            text.contains("template references unknown path"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn sessions_before_2026_07_28_are_legacy() {
+        assert!(is_legacy(Some(ProtocolVersion::V_2025_11_25)));
+        assert!(is_legacy(Some(ProtocolVersion::V_2024_11_05)));
+        assert!(is_legacy(None));
+        assert!(!is_legacy(Some(ProtocolVersion::V_2026_07_28)));
+    }
+
+    #[test]
+    fn a_legacy_tool_keeps_only_an_object_output_schema() {
+        let object = serde_json::json!({ "type": "object", "properties": {} });
+        let number = serde_json::json!({ "type": "number" });
+        let kept = legacy_tool(tool_with_output_schema(Some(object.clone())));
+        assert_eq!(
+            serde_json::Value::Object((*kept.output_schema.unwrap()).clone()),
+            object
+        );
+        assert!(
+            legacy_tool(tool_with_output_schema(Some(number)))
+                .output_schema
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_legacy_result_keeps_only_object_structured_content() {
+        let object = legacy_result(CallToolResult::structured(serde_json::json!({ "n": 7 })));
+        assert_eq!(
+            object.structured_content,
+            Some(serde_json::json!({ "n": 7 }))
+        );
+
+        // Without structured content, the value is still in the text content.
+        let number = legacy_result(CallToolResult::structured(serde_json::json!(7)));
+        assert!(number.structured_content.is_none());
+        assert_eq!(number.content[0].as_text().unwrap().text, "7");
+    }
+
+    // Give every tool `schema` as its output schema, as an explicit tool
+    // configuration does.
+    fn with_output_schema(mut server: McpServer, schema: serde_json::Value) -> McpServer {
+        for resolved in server.tools.values_mut() {
+            resolved.tool = resolved
+                .tool
+                .clone()
+                .with_raw_output_schema(Arc::new(schema.as_object().unwrap().clone()));
+            resolved.output_validator = Some(jsonschema::validator_for(&schema).unwrap());
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn test_legacy_session_omits_non_object_output() {
+        // Before 2026-07-28, an output schema and structured content must be
+        // objects, so a number result is listed without its output schema and
+        // returned as text only.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let server = with_output_schema(
+            build_test_server(&runtime),
+            serde_json::json!({ "type": "number" }),
+        );
+        let client = setup_test_client_as(
+            server,
+            TestClientHandler {
+                protocol_version: Some(ProtocolVersion::V_2025_11_25),
+            },
+            rmcp::ClientLifecycleMode::Initialize,
+        )
+        .await;
+
+        let tool = client.list_tools(None).await.unwrap().tools[0].clone();
+        assert!(tool.output_schema.is_none());
+
+        let result = client
+            .call_tool(CallToolRequestParams::new(tool.name).with_arguments(args!({ "x": 5 })))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(result.structured_content.is_none());
+        assert_eq!(result.content[0].as_text().unwrap().text, "7");
+    }
+
+    #[tokio::test]
+    async fn test_modern_session_keeps_non_object_output() {
+        // From 2026-07-28, any output schema and any structured content are
+        // allowed, so the number result keeps both.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        let server = with_output_schema(
+            build_test_server(&runtime),
+            serde_json::json!({ "type": "number" }),
+        );
+        let client = setup_test_client_as(
+            server,
+            TestClientHandler::default(),
+            rmcp::ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await;
+
+        let tool = client.list_tools(None).await.unwrap().tools[0].clone();
+        assert_eq!(
+            tool.output_schema
+                .map(|schema| serde_json::Value::Object((*schema).clone())),
+            Some(serde_json::json!({ "type": "number" }))
+        );
+
+        let result = client
+            .call_tool(CallToolRequestParams::new(tool.name).with_arguments(args!({ "x": 5 })))
+            .await
+            .unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(result.structured_content, Some(serde_json::json!(7)));
     }
 }

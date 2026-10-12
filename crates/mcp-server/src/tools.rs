@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
+use rmcp::ErrorData;
 use rmcp::model::{
-    AnnotateAble, Annotations, CallToolResult, Content, Meta, RawContent, RawEmbeddedResource,
-    RawImageContent, RawTextContent, ResourceContents, Role, Tool, ToolAnnotations,
+    Annotations, AudioContent, CallToolResult, ContentBlock, EmbeddedResource, ErrorCode,
+    ImageContent, MetaObject, Resource, ResourceContents, Role, TextContent, Tool, ToolAnnotations,
 };
 use serde_json::Value;
 
@@ -50,7 +51,22 @@ pub fn call_tool_result(value: &Value) -> Result<CallToolResult, String> {
     Ok(result)
 }
 
-fn content_block(value: &Value) -> Result<Content, String> {
+/// Build the JSON-RPC error for a `tool-error` from `tool.call()`.
+pub fn tool_error(value: &Value) -> Result<ErrorData, String> {
+    let object = as_object(value, "tool-error")?;
+    let code = object
+        .get("code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .ok_or_else(|| "'code' must be a 32-bit integer".to_string())?;
+    Ok(ErrorData::new(
+        ErrorCode(code),
+        required_string(object, "message")?,
+        optional_json(object, "data")?,
+    ))
+}
+
+fn content_block(value: &Value) -> Result<ContentBlock, String> {
     let object = as_object(value, "content-block")?;
     let case = object
         .get("type")
@@ -60,62 +76,56 @@ fn content_block(value: &Value) -> Result<Content, String> {
         .get("value")
         .ok_or_else(|| format!("content-block case '{case}' needs a \"value\""))?;
 
-    let raw = match case {
+    match case {
         "text" => {
             let payload = as_object(payload, "text-content")?;
-            RawContent::Text(RawTextContent {
-                text: required_string(payload, "text")?,
-                meta: meta(payload.get("meta"))?,
-            })
+            let mut text = TextContent::new(required_string(payload, "text")?);
+            text.meta = meta(payload.get("meta"))?;
+            text.annotations = optional_field(payload, "annotations", annotations)?;
+            Ok(ContentBlock::Text(text))
         }
         "image" => {
             let payload = as_object(payload, "image-content")?;
-            RawContent::Image(RawImageContent {
-                data: required_string(payload, "data")?,
-                mime_type: required_string(payload, "mime-type")?,
-                meta: meta(payload.get("meta"))?,
-            })
+            let mut image = ImageContent::new(
+                required_string(payload, "data")?,
+                required_string(payload, "mime-type")?,
+            );
+            image.meta = meta(payload.get("meta"))?;
+            image.annotations = optional_field(payload, "annotations", annotations)?;
+            Ok(ContentBlock::Image(image))
         }
         "audio" => {
             let payload = as_object(payload, "audio-content")?;
-            // The 3.x upgrade will allow this.
-            if meta(payload.get("meta"))?.is_some() {
-                tracing::warn!("dropping _meta on audio content (unsupported by rmcp 1.x)");
-            }
-            RawContent::Audio(rmcp::model::RawAudioContent {
-                data: required_string(payload, "data")?,
-                mime_type: required_string(payload, "mime-type")?,
-            })
+            let mut audio = AudioContent::new(
+                required_string(payload, "data")?,
+                required_string(payload, "mime-type")?,
+            );
+            audio.meta = meta(payload.get("meta"))?;
+            audio.annotations = optional_field(payload, "annotations", annotations)?;
+            Ok(ContentBlock::Audio(audio))
         }
         "resource-link" => {
             let payload = as_object(payload, "resource-link")?;
-            RawContent::ResourceLink(rmcp::model::RawResource {
-                uri: required_string(payload, "uri")?,
-                name: optional_string(payload, "name")?.unwrap_or_default(),
-                title: None,
-                description: optional_string(payload, "description")?,
-                mime_type: optional_string(payload, "mime-type")?,
-                size: None,
-                icons: None,
-                meta: meta(payload.get("meta"))?,
-            })
+            let mut link = Resource::new(
+                required_string(payload, "uri")?,
+                optional_string(payload, "name")?.unwrap_or_default(),
+            );
+            link.description = optional_string(payload, "description")?;
+            link.mime_type = optional_string(payload, "mime-type")?;
+            link.meta = meta(payload.get("meta"))?;
+            link.annotations = optional_field(payload, "annotations", annotations)?;
+            Ok(ContentBlock::ResourceLink(link))
         }
         "resource" => {
             let payload = as_object(payload, "embedded-resource")?;
-            RawContent::Resource(RawEmbeddedResource {
-                resource: resource_contents(payload.get("resource-data"))?,
-                meta: meta(payload.get("meta"))?,
-            })
+            let mut resource =
+                EmbeddedResource::new(resource_contents(payload.get("resource-data"))?);
+            resource.meta = meta(payload.get("meta"))?;
+            resource.annotations = optional_field(payload, "annotations", annotations)?;
+            Ok(ContentBlock::Resource(resource))
         }
-        other => return Err(format!("unknown content-block case '{other}'")),
-    };
-
-    let annotations = optional_field(
-        as_object(payload, "content-block payload")?,
-        "annotations",
-        annotations,
-    )?;
-    Ok(raw.optional_annotate(annotations))
+        other => Err(format!("unknown content-block case '{other}'")),
+    }
 }
 
 fn resource_contents(value: Option<&Value>) -> Result<ResourceContents, String> {
@@ -154,13 +164,7 @@ fn annotations(value: &Value) -> Result<Annotations, String> {
         Some(Value::Null) | None => None,
         Some(other) => return Err(format!("audience must be a list, got {}", type_of(other))),
     };
-    let last_modified = match optional_string(object, "last-modified")? {
-        Some(text) => Some(
-            text.parse()
-                .map_err(|e| format!("'last-modified' is not an ISO 8601 timestamp: {e}"))?,
-        ),
-        None => None,
-    };
+    let last_modified = optional_string(object, "last-modified")?;
     let priority = match object.get("priority").and_then(Value::as_f64) {
         Some(priority) if (0.0..=1.0).contains(&priority) => Some(priority as f32),
         Some(priority) => {
@@ -200,7 +204,7 @@ fn tool_annotations(value: &Value) -> Result<ToolAnnotations, String> {
 
 // A `list<meta-entry>` is a list of two-element arrays. Both elements are
 // (currently) strings in the WIT, while a `_meta` value is any JSON.
-fn meta(value: Option<&Value>) -> Result<Option<Meta>, String> {
+fn meta(value: Option<&Value>) -> Result<Option<MetaObject>, String> {
     let items = match value {
         Some(Value::Array(items)) => items,
         Some(Value::Null) | None => return Ok(None),
@@ -228,7 +232,7 @@ fn meta(value: Option<&Value>) -> Result<Option<Meta>, String> {
             .ok_or_else(|| format!("meta value must be a string, got {}", type_of(value)))?;
         map.insert(key.to_string(), Value::String(value.to_string()));
     }
-    Ok(Some(Meta(map)))
+    Ok(Some(MetaObject(map)))
 }
 
 // A field value as a JSON Schema.
@@ -513,6 +517,32 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_error_becomes_the_json_rpc_error_it_describes() {
+        let value = serde_json::json!({
+            "code": -32602,
+            "message": "Unknown tool: missing",
+            "data": "{\"tool\":\"missing\"}"
+        });
+        let error = tool_error(&value).unwrap();
+        assert_eq!(error.code, ErrorCode(-32602));
+        assert_eq!(error.message, "Unknown tool: missing");
+        assert_eq!(error.data, Some(serde_json::json!({ "tool": "missing" })));
+    }
+
+    #[test]
+    fn a_tool_error_without_data_has_none() {
+        let value = serde_json::json!({ "code": -32603, "message": "down", "data": null });
+        assert_eq!(tool_error(&value).unwrap().data, None);
+    }
+
+    #[test]
+    fn a_tool_error_code_must_fit_32_bits() {
+        let value = serde_json::json!({ "code": 4_294_967_296_i64, "message": "x", "data": null });
+        let err = tool_error(&value).unwrap_err();
+        assert!(err.contains("32-bit integer"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn every_content_case_is_read() {
         let value = serde_json::json!({
             "content": [
@@ -534,10 +564,7 @@ mod tests {
         assert_eq!(result.content.len(), 5);
         assert_eq!(result.content[0].as_text().unwrap().text, "t");
         assert_eq!(result.content[1].as_image().unwrap().mime_type, "image/png");
-        let RawContent::Audio(audio) = &result.content[2].raw else {
-            panic!("expected audio content");
-        };
-        assert_eq!(audio.mime_type, "audio/wav");
+        assert_eq!(result.content[2].as_audio().unwrap().mime_type, "audio/wav");
         assert_eq!(
             result.content[3].as_resource_link().unwrap().uri,
             "file:///a"
@@ -565,13 +592,21 @@ mod tests {
             "meta": []
         });
         let result = call_tool_result(&value).unwrap();
-        let annotations = result.content[0].annotations.as_ref().unwrap();
+        let annotations = result.content[0]
+            .as_text()
+            .unwrap()
+            .annotations
+            .as_ref()
+            .unwrap();
         assert_eq!(
             annotations.audience.as_deref(),
             Some([Role::User, Role::Assistant].as_slice())
         );
         assert_eq!(annotations.priority, Some(0.5));
-        assert!(annotations.last_modified.is_some());
+        assert_eq!(
+            annotations.last_modified.as_deref(),
+            Some("2026-09-16T00:00:00Z")
+        );
     }
 
     #[test]
