@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -63,31 +63,21 @@ async fn main() -> Result<ExitCode> {
 
     let toolset = HostToolset::new(runtime.host(), None);
     let output = match cli.command {
-        Command::List { .. } => toolset.list().await.map(|tools| {
-            let fields = ["input-schema", "output-schema"];
-            Value::Array(
-                tools
-                    .into_iter()
-                    .map(|tool| decoded(tool, &fields))
-                    .collect(),
-            )
-        }),
+        Command::List { .. } => toolset.list().await.and_then(list_result),
         Command::Call { meta, call, .. } => match request(&call, meta) {
-            Ok(request) => toolset
-                .call(request)
-                .await
-                .map(|result| decoded(result, &["structured-content"])),
+            Ok(request) => toolset.call(request).await.and_then(call_result),
             Err(e) => Err(e),
         },
     };
     runtime.shutdown().await;
 
     // A tool-error is printed as JSON on stdout like a result and summarized
-    // on stderr. Any other error is a host failure, reported on stderr only.
+    // on stderr. Any other error, a host failure or a value that is not valid
+    // `composable:tools` JSON, is reported on stderr only.
     let output = match output {
         Ok(output) => output,
         Err(error) => {
-            let Some(tool_error) = tool_error(&error) else {
+            let Some(tool_error) = tool_error(&error)? else {
                 return Err(error);
             };
             println!("{}", serde_json::to_string_pretty(&tool_error)?);
@@ -115,33 +105,54 @@ fn request(call: &[String], meta: Vec<(String, String)>) -> Result<Value> {
     }))
 }
 
-// `value` with each of `fields` that holds a JSON-encoded string (a
-// `composable:tools` `json`) replaced by the JSON it encodes. A field that is
-// absent, null or not valid JSON remains as is.
-fn decoded(mut value: Value, fields: &[&str]) -> Value {
+// `value` with each of `fields`, a `composable:tools` `json` string, replaced
+// by the JSON it encodes. A field that is absent or null remains as is. A
+// string that is not valid JSON is an error, since the type requires JSON.
+fn decoded(mut value: Value, fields: &[&str]) -> Result<Value> {
     for field in fields {
-        let parsed = match value.get(*field) {
-            Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok(),
-            _ => None,
-        };
-        if let Some(json) = parsed {
+        if let Some(Value::String(text)) = value.get(*field) {
+            let json: Value = serde_json::from_str(text)
+                .with_context(|| format!("'{field}' is not valid JSON"))?;
             value[*field] = json;
         }
     }
-    value
+    Ok(value)
+}
+
+// The tools' metadata, each with its schemas decoded.
+fn list_result(tools: Vec<Value>) -> Result<Value> {
+    tools
+        .into_iter()
+        .map(|tool| {
+            let name = tool["name"].as_str().unwrap_or_default().to_string();
+            decoded(tool, &["input-schema", "output-schema"])
+                .with_context(|| format!("tool '{name}'"))
+        })
+        .collect::<Result<_>>()
+        .map(Value::Array)
+}
+
+// A call's result, with its structured content decoded.
+fn call_result(result: Value) -> Result<Value> {
+    decoded(result, &["structured-content"]).context("the tool's result")
 }
 
 // The `tool-error` that `error` carries, with its `data` decoded, or `None`
 // if `error` is not a tool-error (an integer `code` and a string `message`).
-fn tool_error(error: &anyhow::Error) -> Option<Value> {
-    let ComponentError {
+// A tool-error whose `data` is not valid JSON is an error.
+fn tool_error(error: &anyhow::Error) -> Result<Option<Value>> {
+    let Some(ComponentError {
         value: Some(Val::Json(value)),
-    } = error.downcast_ref::<ComponentError>()?
+    }) = error.downcast_ref::<ComponentError>()
     else {
-        return None;
+        return Ok(None);
     };
-    (value["code"].is_i64() && value["message"].is_string())
-        .then(|| decoded(value.clone(), &["data"]))
+    if !(value["code"].is_i64() && value["message"].is_string()) {
+        return Ok(None);
+    }
+    decoded(value.clone(), &["data"])
+        .context("the tool's error")
+        .map(Some)
 }
 
 // A tool-error's message and code, on one line.
@@ -168,37 +179,49 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_shows_schemas_as_json() {
+    fn a_list_result_shows_schemas_as_json() {
         let tool = json!({
             "name": "echo",
             "input-schema": r#"{"type":"object"}"#,
             "output-schema": null,
             "meta": [["io.example/raw", r#"{"a":1}"#]],
         });
-        let tool = decoded(tool, &["input-schema", "output-schema"]);
-        assert_eq!(tool["input-schema"], json!({ "type": "object" }));
-        assert_eq!(tool["output-schema"], Value::Null);
+        let listed = list_result(vec![tool]).unwrap();
+        assert_eq!(listed[0]["input-schema"], json!({ "type": "object" }));
+        assert_eq!(listed[0]["output-schema"], Value::Null);
         // A meta entry's value is text.
-        assert_eq!(tool["meta"], json!([["io.example/raw", r#"{"a":1}"#]]));
+        assert_eq!(listed[0]["meta"], json!([["io.example/raw", r#"{"a":1}"#]]));
     }
 
     #[test]
-    fn a_schema_that_is_not_json_remains_a_string() {
-        let tool = decoded(json!({ "input-schema": "{not json" }), &["input-schema"]);
-        assert_eq!(tool["input-schema"], json!("{not json"));
+    fn a_schema_that_is_not_json_is_an_error() {
+        let tool = json!({ "name": "echo", "input-schema": "{not json", "output-schema": null });
+        let error = list_result(vec![tool]).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.starts_with("tool 'echo': 'input-schema' is not valid JSON: "),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_call_result_shows_structured_content_as_json() {
-        let fields = ["structured-content"];
-        let result = decoded(
-            json!({ "is-error": false, "structured-content": r#"{"temperature":21}"# }),
-            &fields,
-        );
+        let result = json!({ "is-error": false, "structured-content": r#"{"temperature":21}"# });
+        let result = call_result(result).unwrap();
         assert_eq!(result["structured-content"], json!({ "temperature": 21 }));
 
-        let result = decoded(json!({ "structured-content": null }), &fields);
+        let result = call_result(json!({ "structured-content": null })).unwrap();
         assert_eq!(result["structured-content"], Value::Null);
+    }
+
+    #[test]
+    fn structured_content_that_is_not_json_is_an_error() {
+        let error = call_result(json!({ "structured-content": "hi" })).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.starts_with("the tool's result: 'structured-content' is not valid JSON: "),
+            "{text}"
+        );
     }
 
     #[test]
@@ -208,7 +231,7 @@ mod tests {
             "message": "Unknown tool: x",
             "data": r#"{"known":["echo"]}"#,
         }));
-        let tool_error = tool_error(&error).unwrap();
+        let tool_error = tool_error(&error).unwrap().unwrap();
         assert_eq!(
             tool_error,
             json!({
@@ -224,19 +247,32 @@ mod tests {
     fn a_tool_error_without_data_includes_its_message_and_code() {
         let error =
             component_error(json!({ "code": -32602, "message": "Unknown tool: x", "data": null }));
-        let tool_error = tool_error(&error).unwrap();
+        let tool_error = tool_error(&error).unwrap().unwrap();
         assert_eq!(tool_error["data"], Value::Null);
         assert_eq!(summary(&tool_error), "Unknown tool: x (code -32602)");
     }
 
     #[test]
+    fn a_tool_error_whose_data_is_not_json_is_an_error() {
+        let error =
+            component_error(json!({ "code": -32602, "message": "Unknown tool: x", "data": "hi" }));
+        let text = format!("{:#}", tool_error(&error).unwrap_err());
+        assert!(
+            text.starts_with("the tool's error: 'data' is not valid JSON: "),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn other_errors_are_not_tool_errors() {
-        assert!(tool_error(&anyhow::anyhow!("component 'x' not found")).is_none());
+        let host = anyhow::anyhow!("component 'x' not found");
+        assert!(tool_error(&host).unwrap().is_none());
 
         // A toolset's `list` fails with a string, not a tool-error.
-        assert!(tool_error(&component_error(json!("alerts: down"))).is_none());
+        let listed = component_error(json!("alerts: down"));
+        assert!(tool_error(&listed).unwrap().is_none());
 
         let without_code = component_error(json!({ "message": "Unknown tool: x" }));
-        assert!(tool_error(&without_code).is_none());
+        assert!(tool_error(&without_code).unwrap().is_none());
     }
 }
