@@ -243,8 +243,38 @@ fn a_failing_delegate_fails_the_whole_list() -> Result<()> {
 }
 
 #[test]
-fn a_toolset_needs_at_least_one_import_and_unique_names() {
-    assert!(Builder::new(Vec::new(), Vec::new()).is_err());
+fn an_empty_toolset_lists_nothing_and_fails_on_call() -> Result<()> {
+    let engine = engine()?;
+    let builder = Builder::new(Vec::new(), Vec::new())?;
+    let component = Component::new(&engine, composable_factory::build(&builder)?)?;
+    let linker = linker(&engine, Calls::default(), false)?;
+
+    let (listed, called) = block_on(async {
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let list = function(&mut store, &instance, "list")?;
+        let call = function(&mut store, &instance, "call")?;
+
+        let mut listed = [Val::Bool(false)];
+        list.call_async(&mut store, &[], &mut listed).await?;
+        let mut called = [Val::Bool(false)];
+        call.call_async(&mut store, &[request("anything", "{}")], &mut called)
+            .await?;
+        anyhow::Ok((listed, called))
+    })?;
+
+    assert_eq!(listed[0], ok(Val::List(Vec::new())));
+
+    let Val::Result(Err(Some(error))) = &called[0] else {
+        panic!("a call to an empty toolset is an error: {:?}", called[0]);
+    };
+    assert_eq!(field(error, "code"), &Val::S32(-32602));
+    assert_eq!(field(error, "message"), &string("Unknown tool: anything"));
+    Ok(())
+}
+
+#[test]
+fn a_toolset_requires_unique_names() {
     let repeated = Builder::new(vec!["forecast".to_string()], vec!["forecast".to_string()]);
     assert!(repeated.is_err());
 }

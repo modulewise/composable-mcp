@@ -35,9 +35,6 @@ pub struct Builder {
 impl Builder {
     /// Builder for the toolset component.
     pub fn new(tools: Vec<String>, toolsets: Vec<String>) -> Result<Self> {
-        if tools.is_empty() && toolsets.is_empty() {
-            bail!("a toolset requires at least one tool or toolset");
-        }
         let mut names = BTreeSet::new();
         for name in tools.iter().chain(&toolsets) {
             if !names.insert(name) {

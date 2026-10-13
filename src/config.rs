@@ -18,7 +18,7 @@ const FUNCTION_FACTORY: &str = "oci://ghcr.io/modulewise/component/function-fact
 const JSON_MAPPER: &str = "oci://ghcr.io/modulewise/component/json-mapper:0.4.0";
 
 /// Generates a `composable:tools/toolset` over named tools and toolsets.
-const TOOLSET_FACTORY: &str = "oci://ghcr.io/modulewise/component/toolset-factory:0.1.1";
+const TOOLSET_FACTORY: &str = "oci://ghcr.io/modulewise/component/toolset-factory:0.1.2";
 
 /// The mapper every generated function imports, emitted once.
 const JSON_MAPPER_NAME: &str = "_json-mapper";
@@ -138,9 +138,6 @@ impl ToolConfigHandler {
 fn toolset(name: &str, properties: &mut PropertyMap) -> Result<Vec<Definition>> {
     let tools = names(name, "tools", properties)?;
     let toolsets = names(name, "toolsets", properties)?;
-    if tools.is_empty() && toolsets.is_empty() {
-        bail!("Toolset '{name}' requires at least one of 'tools' or 'toolsets'");
-    }
     let factory = format!("_{name}-factory");
 
     // The toolset-factory reads each as a comma-separated list, absent if empty.
@@ -361,11 +358,24 @@ mod tests {
     }
 
     #[test]
-    fn a_toolset_requires_at_least_one_member() {
-        let error = ToolConfigHandler::default()
-            .handle_definition(definition("toolset", "outlook", json!({ "tools": [] })))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("requires at least one"), "{error}");
+    fn a_toolset_can_be_completely_empty() {
+        for properties in [json!({}), json!({ "tools": [], "toolsets": [] })] {
+            let produced = ToolConfigHandler::default()
+                .handle_definition(definition("toolset", "outlook", properties.clone()))
+                .unwrap();
+            let components = components(produced);
+
+            assert_eq!(
+                components["outlook"],
+                json!({ "uri": "factory:_outlook-factory", "imports": [] }),
+                "{properties}"
+            );
+            assert_eq!(
+                components["_outlook-factory"],
+                json!({ "uri": TOOLSET_FACTORY, "config": {} }),
+                "{properties}"
+            );
+            assert_eq!(components.len(), 2, "{properties}");
+        }
     }
 }
