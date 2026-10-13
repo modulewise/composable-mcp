@@ -274,7 +274,7 @@ fn an_empty_toolset_lists_nothing_and_fails_on_call() -> Result<()> {
 }
 
 #[test]
-fn a_toolset_needs_unique_names() {
+fn a_toolset_requires_unique_names() {
     let repeated = Builder::new(vec!["forecast".to_string()], vec!["forecast".to_string()]);
     assert!(repeated.is_err());
 }
