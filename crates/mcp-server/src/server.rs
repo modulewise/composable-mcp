@@ -30,14 +30,15 @@ use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-        InitializeRequestParams, InitializeResult, JsonObject, ListToolsResult, MetaObject,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+        ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
+        ServerConfig, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
     transport::streamable_http_server::session::local::LocalSessionManager,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -81,22 +82,26 @@ impl McpServer {
         }
     }
 
-    /// Run the MCP server, listening for HTTP requests until the shutdown signal fires.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-        let addr = self.addr;
+    // The Streamable HTTP service at `/mcp`, behind the origin policy.
+    fn router(self) -> axum::Router {
         let origin_policy = self.origin_policy.clone();
-        // Keep a handle to the tracer provider for shutdown.
-        let tracer_provider = self.tracer_provider.clone();
-
         let service = StreamableHttpService::new(
             move || Ok(self.clone()),
             LocalSessionManager::default().into(),
             Default::default(),
         );
-
-        let router = axum::Router::new().nest_service("/mcp", service).layer(
+        axum::Router::new().nest_service("/mcp", service).layer(
             axum::middleware::from_fn_with_state(origin_policy, validate_origin),
-        );
+        )
+    }
+
+    /// Run the MCP server, listening for HTTP requests until the shutdown signal fires.
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+        let addr = self.addr;
+        // Keep a handle to the tracer provider for shutdown.
+        let tracer_provider = self.tracer_provider.clone();
+
+        let router = self.router();
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
         tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
@@ -467,6 +472,14 @@ fn tool_execution_error(
     )
 }
 
+/// The protocol versions this server supports: those with output schemas,
+/// structured content and resource links.
+const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2025_06_18,
+    ProtocolVersion::V_2025_11_25,
+    ProtocolVersion::V_2026_07_28,
+];
+
 // Whether a session's negotiated protocol version predates 2026-07-28, the
 // first to admit any JSON Schema as an output schema and any JSON value as
 // structured content. Earlier versions require both to be objects.
@@ -702,6 +715,15 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
         KeyValue::new("network.protocol.name", "http"),
     ];
 
+    // The spec version used for this request as negotiated by `initialize`, or
+    // named in the request's `_meta`.
+    if let Some(version) = context.protocol_version() {
+        attrs.push(KeyValue::new(
+            "mcp.protocol.version",
+            version.as_str().to_string(),
+        ));
+    }
+
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
         if let Some(session_id) = parts
             .headers
@@ -709,13 +731,6 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
             .and_then(|v| v.to_str().ok())
         {
             attrs.push(KeyValue::new("mcp.session.id", session_id.to_string()));
-        }
-        if let Some(version) = parts
-            .headers
-            .get("MCP-Protocol-Version")
-            .and_then(|v| v.to_str().ok())
-        {
-            attrs.push(KeyValue::new("mcp.protocol.version", version.to_string()));
         }
         if let Some(connect_info) = parts
             .extensions
@@ -790,28 +805,8 @@ impl ServerHandler for McpServer {
         }
     }
 
-    async fn initialize(
-        &self,
-        request: InitializeRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<InitializeResult, rmcp::ErrorData> {
-        let meta = if context.meta.0.is_empty() {
-            None
-        } else {
-            Some(&context.meta.0)
-        };
-        let span_ctx = self.start_mcp_span("initialize", None, request_attributes(&context), meta);
-
-        if context.peer.peer_info().is_none() {
-            context.peer.set_peer_info(request);
-        }
-        let result = self.get_info();
-
-        if let Some((mut span, _)) = span_ctx {
-            span.end();
-        }
-
-        Ok(result)
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(SUPPORTED_PROTOCOL_VERSIONS)
     }
 
     async fn list_tools(
@@ -1502,25 +1497,81 @@ mod tests {
         client_handler: TestClientHandler,
         lifecycle: rmcp::ClientLifecycleMode,
     ) -> TestClient {
-        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        try_setup_test_client(
+            server_handler,
+            client_handler,
+            lifecycle,
+            TestTransport::InProcess,
+        )
+        .await
+        .unwrap()
+    }
 
-        let server_handle = tokio::spawn(async move {
-            server_handler
-                .serve(server_transport)
-                .await?
-                .waiting()
-                .await?;
-            anyhow::Ok(())
-        });
+    // How a test client connects, either an in-process stream, or the server's
+    // HTTP router on a local port.
+    #[derive(Debug, Clone, Copy)]
+    enum TestTransport {
+        InProcess,
+        Http,
+    }
 
-        let client = client_handler
-            .serve_with_lifecycle(client_transport, lifecycle)
-            .await
-            .unwrap();
+    const TEST_TRANSPORTS: [TestTransport; 2] = [TestTransport::InProcess, TestTransport::Http];
 
-        TestClient {
-            client: Some(client),
-            server_handle: Some(server_handle),
+    // A test client opening its session with `lifecycle` through `transport`,
+    // or the error that kept the session from opening.
+    async fn try_setup_test_client(
+        server_handler: McpServer,
+        client_handler: TestClientHandler,
+        lifecycle: rmcp::ClientLifecycleMode,
+        transport: TestTransport,
+    ) -> Result<TestClient, Box<rmcp::service::ClientInitializeError>> {
+        let (server_handle, client) = match transport {
+            TestTransport::InProcess => {
+                let (server_transport, client_transport) = tokio::io::duplex(4096);
+                let server_handle = tokio::spawn(async move {
+                    server_handler
+                        .serve(server_transport)
+                        .await?
+                        .waiting()
+                        .await?;
+                    anyhow::Ok(())
+                });
+                let client = client_handler
+                    .serve_with_lifecycle(client_transport, lifecycle)
+                    .await;
+                (server_handle, client)
+            }
+            TestTransport::Http => {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let router = server_handler.router();
+                let server_handle = tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await?;
+                    anyhow::Ok(())
+                });
+                let client_transport = rmcp::transport::StreamableHttpClientTransport::from_uri(
+                    format!("http://{addr}/mcp"),
+                );
+                let client = client_handler
+                    .serve_with_lifecycle(client_transport, lifecycle)
+                    .await;
+                (server_handle, client)
+            }
+        };
+
+        match client {
+            Ok(client) => Ok(TestClient {
+                client: Some(client),
+                server_handle: Some(server_handle),
+            }),
+            Err(error) => {
+                server_handle.abort();
+                Err(Box::new(error))
+            }
         }
     }
 
@@ -1733,7 +1784,7 @@ mod tests {
     #[test]
     fn sessions_before_2026_07_28_are_legacy() {
         assert!(is_legacy(Some(ProtocolVersion::V_2025_11_25)));
-        assert!(is_legacy(Some(ProtocolVersion::V_2024_11_05)));
+        assert!(is_legacy(Some(ProtocolVersion::V_2025_06_18)));
         assert!(is_legacy(None));
         assert!(!is_legacy(Some(ProtocolVersion::V_2026_07_28)));
     }
@@ -1845,5 +1896,198 @@ mod tests {
             .unwrap();
         assert!(!result.is_error.unwrap_or(false));
         assert_eq!(result.structured_content, Some(serde_json::json!(7)));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_agrees_to_a_supported_version() {
+        // A legacy client requesting a supported version gets that version.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        for transport in TEST_TRANSPORTS {
+            for version in [ProtocolVersion::V_2025_06_18, ProtocolVersion::V_2025_11_25] {
+                let client = try_setup_test_client(
+                    build_test_server(&runtime),
+                    TestClientHandler {
+                        protocol_version: Some(version.clone()),
+                    },
+                    rmcp::ClientLifecycleMode::Initialize,
+                    transport,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    client.peer_info().unwrap().protocol_version,
+                    version,
+                    "{transport:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_falls_back_from_an_unsupported_version() {
+        // A legacy client requesting an unsupported version is offered the
+        // newest supported version that has `initialize`.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        for transport in TEST_TRANSPORTS {
+            for version in [ProtocolVersion::V_2024_11_05, ProtocolVersion::V_2025_03_26] {
+                let client = try_setup_test_client(
+                    build_test_server(&runtime),
+                    TestClientHandler {
+                        protocol_version: Some(version.clone()),
+                    },
+                    rmcp::ClientLifecycleMode::Initialize,
+                    transport,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    client.peer_info().unwrap().protocol_version,
+                    ProtocolVersion::V_2025_11_25,
+                    "{transport:?} requesting {version}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_lists_the_supported_versions() {
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        for transport in TEST_TRANSPORTS {
+            let client = try_setup_test_client(
+                build_test_server(&runtime),
+                TestClientHandler::default(),
+                rmcp::ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+                transport,
+            )
+            .await
+            .unwrap();
+            let result = client
+                .discover(rmcp::model::RequestMetaObject::with_client_context(
+                    ProtocolVersion::V_2026_07_28,
+                    rmcp::model::Implementation::default(),
+                    rmcp::model::ClientCapabilities::default(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.supported_versions, SUPPORTED_PROTOCOL_VERSIONS,
+                "{transport:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_at_an_unsupported_version_is_rejected() {
+        // A request naming an unsupported version in its `_meta` is rejected
+        // with the supported versions, so a client preferring only that
+        // version finds none in common.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        for transport in TEST_TRANSPORTS {
+            let Err(error) = try_setup_test_client(
+                build_test_server(&runtime),
+                TestClientHandler::default(),
+                rmcp::ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2025_03_26],
+                },
+                transport,
+            )
+            .await
+            else {
+                panic!("{transport:?}: a session opened at an unsupported version");
+            };
+            match *error {
+                rmcp::service::ClientInitializeError::NoCompatibleProtocolVersion {
+                    server_supported,
+                    ..
+                } => assert_eq!(
+                    server_supported, SUPPORTED_PROTOCOL_VERSIONS,
+                    "{transport:?}"
+                ),
+                other => panic!("{transport:?}: {other}"),
+            }
+        }
+    }
+
+    // A server recording its spans in `exporter`.
+    fn with_span_exporter(
+        mut server: McpServer,
+        exporter: &opentelemetry_sdk::trace::InMemorySpanExporter,
+    ) -> McpServer {
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        server.tracer_provider = Some(Arc::new(provider));
+        server
+    }
+
+    #[tokio::test]
+    async fn test_spans_carry_the_request_protocol_version() {
+        // Each request's span records the current protocol version.
+        let wasm = create_wasm(add_two_wat());
+        let runtime = build_runtime(wasm.path()).await;
+        for transport in TEST_TRANSPORTS {
+            for version in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2026_07_28] {
+                let (client_handler, lifecycle) = if version.has_initialize() {
+                    (
+                        TestClientHandler {
+                            protocol_version: Some(version.clone()),
+                        },
+                        rmcp::ClientLifecycleMode::Initialize,
+                    )
+                } else {
+                    (
+                        TestClientHandler::default(),
+                        rmcp::ClientLifecycleMode::Discover {
+                            preferred_versions: vec![version.clone()],
+                        },
+                    )
+                };
+                let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+                let client = try_setup_test_client(
+                    with_span_exporter(build_test_server(&runtime), &exporter),
+                    client_handler,
+                    lifecycle,
+                    transport,
+                )
+                .await
+                .unwrap();
+
+                let tool = client.list_tools(None).await.unwrap().tools[0].clone();
+                client
+                    .call_tool(
+                        CallToolRequestParams::new(tool.name.clone())
+                            .with_arguments(args!({ "x": 5 })),
+                    )
+                    .await
+                    .unwrap();
+
+                let spans = exporter.get_finished_spans().unwrap();
+                for name in [
+                    "tools/list".to_string(),
+                    format!("tools/call {}", tool.name),
+                ] {
+                    let span = spans
+                        .iter()
+                        .find(|span| span.name == name)
+                        .unwrap_or_else(|| panic!("{transport:?} {version}: no span {name}"));
+                    let recorded = span
+                        .attributes
+                        .iter()
+                        .find(|kv| kv.key.as_str() == "mcp.protocol.version")
+                        .map(|kv| kv.value.as_str().to_string());
+                    assert_eq!(
+                        recorded.as_deref(),
+                        Some(version.as_str()),
+                        "{transport:?} {version}: {name}"
+                    );
+                }
+            }
+        }
     }
 }
