@@ -139,8 +139,8 @@ both get-resource-links '{"count":2}' "resource links are returned" \
 both get-resource-reference '{"resourceType":"Text","resourceId":1}' \
   "an embedded text resource is returned" \
   '[.content[].type] == ["text", "resource", "text"] and .content[1].value."resource-data".type == "text"'
-both get-structured-content '{"location":"New York"}' "structured content is returned" \
-  '."structured-content" | fromjson | has("temperature")'
+both get-structured-content '{"location":"New York"}' "structured content is returned as JSON" \
+  '."structured-content" | objects | has("temperature")'
 both get-sum '{"a":2,"b":3}' "get-sum returns the sum" \
   '.content[0].value.text == "The sum of 2 and 3 is 5."'
 both get-tiny-image '{}' "an image is returned" \
@@ -174,8 +174,11 @@ call everything_missing '{}'
 check "mcp-toolset: the server's isError result is unknown tool" \
   '."is-error" == true and (.content[0].value.text | contains("-32602"))'
 
+# A tool-error is printed as JSON on stdout and summarized on stderr.
 call missing '{}'
-if [[ $STATUS -ne 0 ]] && grep -qF '"code":-32602' "$TMP/stderr"; then
+if [[ $STATUS -ne 0 ]] \
+  && jq -e '.code == -32602 and .message == "Unknown tool: missing"' <<<"$OUT" >/dev/null 2>&1 \
+  && grep -qxF 'Error: Unknown tool: missing (code -32602)' "$TMP/stderr"; then
   echo "  PASS  an unknown name is a tool-error"
   PASS=$((PASS + 1))
 else
