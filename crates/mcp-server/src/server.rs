@@ -1784,7 +1784,7 @@ mod tests {
     #[test]
     fn sessions_before_2026_07_28_are_legacy() {
         assert!(is_legacy(Some(ProtocolVersion::V_2025_11_25)));
-        assert!(is_legacy(Some(ProtocolVersion::V_2024_11_05)));
+        assert!(is_legacy(Some(ProtocolVersion::V_2025_06_18)));
         assert!(is_legacy(None));
         assert!(!is_legacy(Some(ProtocolVersion::V_2026_07_28)));
     }
