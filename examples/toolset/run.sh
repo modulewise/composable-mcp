@@ -10,13 +10,6 @@ if ! command -v tools &>/dev/null; then
   exit 1
 fi
 
-for component in mcp-toolset mcp-client; do
-  if [[ ! -f "../../components/lib/${component}.wasm" ]]; then
-    echo "Error: ../../components/lib/${component}.wasm not found (run components/build.sh)" >&2
-    exit 1
-  fi
-done
-
 # The remote side: an MCP server with the calculator tools, on port 3001.
 echo "==> Starting the calculator MCP server..."
 ../calculator/run.sh >/dev/null &

@@ -6,7 +6,7 @@ A toolset that includes a local tool and a nested remote toolset.
 
 - `tools` (from the repository root: `cargo install --path crates/cli`)
 - `jq`
-- The pre-built components: `../../components/build.sh`
+- `mcp-server` and `wasm-tools`, for the [calculator](../calculator) server that `run.sh` starts
 
 ## The Toolset
 
@@ -20,7 +20,8 @@ A `[toolset]` generates a component that imports each listed tool and toolset. I
 `composable:tools/toolset` and acts as an aggregator/router.
 
 - `greeter` is a local tool for a function of the hello component, as in [tool](../tool).
-- `calculator` is a remote toolset with the tools of an MCP server, as in [mcp-toolset](../mcp-toolset).
+- `calculator` is a remote toolset with the tools of an MCP server, declared with `[mcp-toolset]`
+  as in [mcp-toolset](../mcp-toolset).
   `run.sh` starts the server from the [calculator](../calculator) example on port 3001.
 
 Each import is satisfied by the component with its name.

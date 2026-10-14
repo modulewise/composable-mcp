@@ -25,5 +25,5 @@ echo "Listing tools..."
 tools list config.toml
 
 echo
-echo "Calling mcp-toolset_${NAME} with arguments: ${ARGS}"
-tools call config.toml -- "mcp-toolset_${NAME}" "$ARGS" | jq .
+echo "Calling calculator_${NAME} with arguments: ${ARGS}"
+tools call config.toml -- "calculator_${NAME}" "$ARGS" | jq .

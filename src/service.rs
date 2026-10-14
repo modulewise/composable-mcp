@@ -2,8 +2,8 @@ use composable_runtime::{ConfigHandler, Service};
 
 use crate::config::ToolConfigHandler;
 
-/// Contributes the `[tool]` and `[toolset]` config handlers to any host:
-/// an agent's runtime, an MCP server, or a CLI.
+/// Contributes the `[tool]`, `[toolset]`, `[mcp-tool]` and `[mcp-toolset]`
+/// config handlers to any host: an agent's runtime, an MCP server, or a CLI.
 #[derive(Default)]
 pub struct ToolService;
 

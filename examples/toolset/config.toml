@@ -13,41 +13,5 @@ spec-version = "2026-07-28"
 uri = "oci://ghcr.io/modulewise/demo/hello:0.2.0"
 
 # A remote toolset: 4 calculator tools from an MCP server.
-[component.calculator]
-uri = "../../components/lib/mcp-toolset.wasm"
-imports = ["mcp-client"]
-config.server-url = "http://localhost:3001/mcp"
-
-[component.mcp-client]
-uri = "../../components/lib/mcp-client.wasm"
-imports = ["http-client", "logger"]
-
-[component.http-client]
-uri = "oci://ghcr.io/modulewise/component/http-client:0.4.0"
-imports = ["http"]
-
-[component.logger]
-uri = "oci://ghcr.io/componentized/logging/levels:v0.2.1"
-imports = ["stdout-logger"]
-config."*" = "info"
-
-[component.stdout-logger]
-uri = "oci://ghcr.io/componentized/logging/to-stdout:v0.2.1"
-imports = ["stdout-to-stderr", "io", "clocks"]
-
-[component.stdout-to-stderr]
-uri = "oci://ghcr.io/componentized/cli/stdout-to-stderr:v0.1.1"
-imports = ["io", "cli"]
-
-[capability.http]
-type = "wasi:http"
-
-[capability.io]
-type = "wasi:io-p2"
-
-[capability.clocks]
-type = "wasi:clocks-p2"
-
-[capability.cli]
-type = "wasi:cli-p2"
-inherit-stderr = true
+[mcp-toolset.calculator]
+server-url = "http://localhost:3001/mcp"
