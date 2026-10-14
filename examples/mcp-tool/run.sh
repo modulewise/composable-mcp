@@ -37,6 +37,6 @@ for entry in "$@"; do
   META+=(--meta "$entry")
 done
 
-echo "Calling mcp-tool with arguments: ${ARGS} (${CONFIG})"
+echo "Calling multiply with arguments: ${ARGS} (${CONFIG})"
 
-tools call "$CONFIG" "${META[@]}" -- mcp-tool "$ARGS" | jq .
+tools call "$CONFIG" "${META[@]}" -- multiply "$ARGS" | jq .

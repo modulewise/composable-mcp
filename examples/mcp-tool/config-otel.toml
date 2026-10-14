@@ -1,4 +1,4 @@
-[component.mcp-tool]
+[component.multiply]
 uri = "../../components/lib/mcp-tool.wasm"
 imports = ["mcp-client"]
 config.server-url = "http://localhost:3001/mcp"
